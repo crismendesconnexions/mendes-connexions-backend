@@ -1,92 +1,52 @@
-// server.js
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-
 const app = express();
-const port = process.env.PORT || 10000; // Render usa porta dinâmica
+const port = process.env.PORT || 3000;
 
-// -------------------------
-// Configuração de CORS
-// -------------------------
-const allowedOrigins = [
-  'https://mendesconnexions.com.br', // produção
-  'http://localhost:3000'             // desenvolvimento
-];
-
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin) return callback(null, true); // permitir Postman/cURL sem origin
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    } else {
-      console.log("🚫 CORS bloqueado para origem:", origin);
-      return callback(new Error('Não permitido pelo CORS'));
-    }
-  },
-  credentials: true,
-  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization','X-Requested-With','X-Application-Key']
-}));
-
+// Middleware
+app.use(cors());
 app.use(express.json());
 
-// -------------------------
-// Configuração Santander
-// -------------------------
+// Credenciais Santander (em produção, use variáveis de ambiente)
 const SANTANDER_CONFIG = {
-  CLIENT_ID: process.env.Client_Id || 'x3mcIb4NSPwYIQcfxRUA3SdjjhywtKfI',
-  CLIENT_SECRET: process.env.Client_Secret || 'lrHiIZpKnGFGNcJF',
-  COVENANT_CODE: process.env.CovenantCode || '178622',
-  PARTICIPANT_CODE: process.env.ParticipantCode || 'REGISTRO12',
-  DICT_KEY: process.env.DictKey || '09199193000126'
+  CLIENT_ID: 'x3mcIb4NSPwYIQcfxRUA3SdjjhywtKfI',
+  CLIENT_SECRET: 'lrHiIZpKnGFGNcJF',
+  COVENANT_CODE: '178622',
+  PARTICIPANT_CODE: 'REGISTRO12',
+  DICT_KEY: '09199193000126'
 };
 
-// -------------------------
-// Função auxiliar: token
-// -------------------------
-async function getSantanderToken() {
-  const params = new URLSearchParams();
-  params.append('grant_type', 'client_credentials');
-
-  const basicAuth = Buffer.from(`${SANTANDER_CONFIG.CLIENT_ID}:${SANTANDER_CONFIG.CLIENT_SECRET}`).toString('base64');
-
-  const response = await axios.post(
-    'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
-    params,
-    {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Authorization': `Basic ${basicAuth}`,
-        'User-Agent': 'PostmanRuntime/7.32.3'
-      },
-      timeout: 15000
-    }
-  );
-
-  return response.data;
-}
-
-// -------------------------
-// Rota: obter token
-// -------------------------
+// Rota para obter token
 app.post('/api/santander/token', async (req, res) => {
   try {
-    console.log('🔑 Solicitando token do Santander...');
-    const tokenData = await getSantanderToken();
-    res.json(tokenData);
+    const formData = new URLSearchParams();
+    formData.append('client_id', SANTANDER_CONFIG.CLIENT_ID);
+    formData.append('client_secret', SANTANDER_CONFIG.CLIENT_SECRET);
+    formData.append('grant_type', 'client_credentials');
+
+    const response = await axios.post(
+      'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
+      formData,
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
+      }
+    );
+
+    res.json(response.data);
   } catch (error) {
-    console.error('❌ Erro ao obter token:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Erro ao obter token', details: error.response?.data || error.message });
+    console.error('Erro ao obter token:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Erro ao obter token do Santander' });
   }
 });
 
-// -------------------------
-// Rota: criar workspace
-// -------------------------
+// Rota para criar workspace
 app.post('/api/santander/workspace', async (req, res) => {
   try {
     const { accessToken } = req.body;
+
     const response = await axios.post(
       'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
       {
@@ -99,47 +59,22 @@ app.post('/api/santander/workspace', async (req, res) => {
           'Content-Type': 'application/json',
           'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
           'Authorization': `Bearer ${accessToken}`
-        },
-        timeout: 15000
+        }
       }
     );
+
     res.json(response.data);
   } catch (error) {
-    console.error('❌ Erro ao criar workspace:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Erro ao criar workspace', details: error.response?.data || error.message });
+    console.error('Erro ao criar workspace:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Erro ao criar workspace no Santander' });
   }
 });
 
-// -------------------------
-// Rota: listar workspaces
-// -------------------------
-app.get('/api/santander/workspaces', async (req, res) => {
-  try {
-    const { accessToken } = req.query;
-    const response = await axios.get(
-      'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/',
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
-          'Authorization': `Bearer ${accessToken}`
-        },
-        timeout: 15000
-      }
-    );
-    res.json(response.data);
-  } catch (error) {
-    console.error('❌ Erro ao listar workspaces:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Erro ao listar workspaces', details: error.response?.data || error.message });
-  }
-});
-
-// -------------------------
-// Rota: registrar boleto
-// -------------------------
+// Rota para registrar boleto
 app.post('/api/santander/boletos', async (req, res) => {
   try {
     const { accessToken, workspaceId, dadosBoleto } = req.body;
+
     const response = await axios.post(
       `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips`,
       dadosBoleto,
@@ -148,55 +83,43 @@ app.post('/api/santander/boletos', async (req, res) => {
           'Content-Type': 'application/json',
           'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
           'Authorization': `Bearer ${accessToken}`
-        },
-        timeout: 30000
+        }
       }
     );
+
     res.json(response.data);
   } catch (error) {
-    console.error('❌ Erro ao registrar boleto:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Erro ao registrar boleto', details: error.response?.data || error.message });
+    console.error('Erro ao registrar boleto:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Erro ao registrar boleto no Santander' });
   }
 });
 
-// -------------------------
-// Rota: gerar PDF do boleto
-// -------------------------
+// Rota para gerar PDF do boleto
 app.post('/api/santander/boletos/pdf', async (req, res) => {
   try {
     const { accessToken, digitableLine, payerDocumentNumber } = req.body;
+
     const response = await axios.post(
       `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`,
-      { payerDocumentNumber: payerDocumentNumber || "12345678900" },
+      {
+        payerDocumentNumber: payerDocumentNumber || "12345678900"
+      },
       {
         headers: {
           'Content-Type': 'application/json',
           'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
           'Authorization': `Bearer ${accessToken}`
-        },
-        timeout: 30000
+        }
       }
     );
+
     res.json(response.data);
   } catch (error) {
-    console.error('❌ Erro ao gerar PDF:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Erro ao gerar PDF', details: error.response?.data || error.message });
+    console.error('Erro ao gerar PDF:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Erro ao gerar PDF do boleto' });
   }
 });
 
-// -------------------------
-// Health check
-// -------------------------
-app.get('/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Servidor funcionando' });
-});
-
-// -------------------------
-// Start server
-// -------------------------
 app.listen(port, () => {
-  console.log(`🚀 Servidor Mendes Connexions rodando na porta ${port}`);
-  console.log(`💓 Health check: http://localhost:${port}/health`);
+  console.log(`Servidor intermediário rodando na porta ${port}`);
 });
-
-module.exports = app;
