@@ -4,29 +4,35 @@ const cors = require('cors');
 const axios = require('axios');
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 10000; // Render usa porta dinâmica
 
 // -------------------------
 // Configuração de CORS
 // -------------------------
 const allowedOrigins = [
-  'https://mendesconnexions.com.br',
-  'http://localhost:3000'
+  'https://mendesconnexions.com.br', // produção
+  'http://localhost:3000'             // desenvolvimento
 ];
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
+    if (!origin) return callback(null, true); // permitir Postman/cURL sem origin
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
     } else {
-      callback(new Error('Não permitido pelo CORS'));
+      console.log("🚫 CORS bloqueado para origem:", origin);
+      return callback(new Error('Não permitido pelo CORS'));
     }
-  }
+  },
+  credentials: true,
+  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization','X-Requested-With','X-Application-Key']
 }));
+
 app.use(express.json());
 
 // -------------------------
-// Variáveis de ambiente
+// Configuração Santander
 // -------------------------
 const SANTANDER_CONFIG = {
   CLIENT_ID: process.env.Client_Id || 'x3mcIb4NSPwYIQcfxRUA3SdjjhywtKfI',
@@ -37,7 +43,7 @@ const SANTANDER_CONFIG = {
 };
 
 // -------------------------
-// Função auxiliar para obter token
+// Função auxiliar: token
 // -------------------------
 async function getSantanderToken() {
   const params = new URLSearchParams();
@@ -66,11 +72,11 @@ async function getSantanderToken() {
 // -------------------------
 app.post('/api/santander/token', async (req, res) => {
   try {
-    console.log('Solicitando token do Santander...');
+    console.log('🔑 Solicitando token do Santander...');
     const tokenData = await getSantanderToken();
     res.json(tokenData);
   } catch (error) {
-    console.error('Erro ao obter token:', error.response?.data || error.message);
+    console.error('❌ Erro ao obter token:', error.response?.data || error.message);
     res.status(500).json({ error: 'Erro ao obter token', details: error.response?.data || error.message });
   }
 });
@@ -97,10 +103,9 @@ app.post('/api/santander/workspace', async (req, res) => {
         timeout: 15000
       }
     );
-
     res.json(response.data);
   } catch (error) {
-    console.error('Erro ao criar workspace:', error.response?.data || error.message);
+    console.error('❌ Erro ao criar workspace:', error.response?.data || error.message);
     res.status(500).json({ error: 'Erro ao criar workspace', details: error.response?.data || error.message });
   }
 });
@@ -122,10 +127,9 @@ app.get('/api/santander/workspaces', async (req, res) => {
         timeout: 15000
       }
     );
-
     res.json(response.data);
   } catch (error) {
-    console.error('Erro ao listar workspaces:', error.response?.data || error.message);
+    console.error('❌ Erro ao listar workspaces:', error.response?.data || error.message);
     res.status(500).json({ error: 'Erro ao listar workspaces', details: error.response?.data || error.message });
   }
 });
@@ -148,10 +152,9 @@ app.post('/api/santander/boletos', async (req, res) => {
         timeout: 30000
       }
     );
-
     res.json(response.data);
   } catch (error) {
-    console.error('Erro ao registrar boleto:', error.response?.data || error.message);
+    console.error('❌ Erro ao registrar boleto:', error.response?.data || error.message);
     res.status(500).json({ error: 'Erro ao registrar boleto', details: error.response?.data || error.message });
   }
 });
@@ -174,10 +177,9 @@ app.post('/api/santander/boletos/pdf', async (req, res) => {
         timeout: 30000
       }
     );
-
     res.json(response.data);
   } catch (error) {
-    console.error('Erro ao gerar PDF:', error.response?.data || error.message);
+    console.error('❌ Erro ao gerar PDF:', error.response?.data || error.message);
     res.status(500).json({ error: 'Erro ao gerar PDF', details: error.response?.data || error.message });
   }
 });
@@ -193,8 +195,8 @@ app.get('/health', (req, res) => {
 // Start server
 // -------------------------
 app.listen(port, () => {
-  console.log(`Servidor Mendes Connexions rodando na porta ${port}`);
-  console.log(`Health check: http://localhost:${port}/health`);
+  console.log(`🚀 Servidor Mendes Connexions rodando na porta ${port}`);
+  console.log(`💓 Health check: http://localhost:${port}/health`);
 });
 
 module.exports = app;
