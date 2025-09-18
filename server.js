@@ -17,7 +17,7 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-// Credenciais Santander (agora seguras no backend via variáveis de ambiente)
+// Credenciais Santander via variáveis de ambiente
 const SANTANDER_CONFIG = {
   CLIENT_ID: process.env.SANTANDER_CLIENT_ID,
   CLIENT_SECRET: process.env.SANTANDER_CLIENT_SECRET,
@@ -26,13 +26,12 @@ const SANTANDER_CONFIG = {
   DICT_KEY: process.env.SANTANDER_DICT_KEY
 };
 
-// Middleware de autenticação
+// Middleware de autenticação Firebase
 const authenticate = async (req, res, next) => {
   try {
     const token = req.headers.authorization?.split('Bearer ')[1];
-    if (!token) {
-      return res.status(401).json({ error: 'Token de acesso não fornecido' });
-    }
+    if (!token) return res.status(401).json({ error: 'Token de acesso não fornecido' });
+
     const decodedToken = await admin.auth().verifyIdToken(token);
     req.user = decodedToken;
     next();
@@ -52,9 +51,7 @@ app.post('/api/santander/token', authenticate, async (req, res) => {
     const response = await axios.post(
       'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
       formData,
-      {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-      }
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
 
     res.json(response.data);
@@ -80,13 +77,24 @@ app.post('/api/santander/boletos', authenticate, async (req, res) => {
     );
 
     const accessToken = tokenResponse.data.access_token;
-
     const workspaceId = await obterWorkspaceId(accessToken);
     const nsuCode = gerarNumeroUnico(dadosBoleto.clientNumber);
     const bankNumber = await gerarBankNumberSequencial();
 
+    // Payload do boleto conforme Santander
     const payload = {
-      // preencher payload do boleto conforme necessário
+      dueDate: dadosBoleto.dueDate, // "YYYY-MM-DD"
+      amount: dadosBoleto.amount,
+      clientNumber: dadosBoleto.clientNumber,
+      nsu: nsuCode,
+      bankNumber,
+      payer: {
+        name: dadosBoleto.payer.name,
+        documentNumber: dadosBoleto.payer.document
+      },
+      covenant: SANTANDER_CONFIG.COVENANT_CODE,
+      participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
+      dictKey: SANTANDER_CONFIG.DICT_KEY
     };
 
     const boletoResponse = await axios.post(
@@ -146,15 +154,22 @@ app.post('/api/santander/boletos/pdf', authenticate, async (req, res) => {
 
 // Funções auxiliares
 function gerarNumeroUnico(clientNumber) {
-  // Implementação igual ao frontend
+  const timestamp = Date.now();
+  return `${clientNumber}-${timestamp}`;
 }
 
 async function gerarBankNumberSequencial() {
-  // Implementação igual ao frontend usando Firestore
+  const docRef = db.collection('sequenciais').doc('bankNumber');
+  const doc = await docRef.get();
+  let number = doc.exists ? doc.data().last + 1 : 100000;
+  await docRef.set({ last: number });
+  return number;
 }
 
 async function obterWorkspaceId(accessToken) {
-  // Implementação para obter ou criar workspace
+  // Aqui você pode buscar workspace existente ou criar um novo
+  // Para simplificação, retornamos um workspace fixo
+  return 'workspace-principal';
 }
 
 // Health check
@@ -163,6 +178,4 @@ app.get("/health", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
