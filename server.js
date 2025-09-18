@@ -82,20 +82,21 @@ app.post('/api/santander/boletos', authenticate, async (req, res) => {
     const bankNumber = await gerarBankNumberSequencial();
 
     // Payload do boleto conforme Santander
-    const payload = {
-      dueDate: dadosBoleto.dueDate, // "YYYY-MM-DD"
-      amount: dadosBoleto.amount,
-      clientNumber: dadosBoleto.clientNumber,
-      nsu: nsuCode,
-      bankNumber,
-      payer: {
-        name: dadosBoleto.payer.name,
-        documentNumber: dadosBoleto.payer.document
-      },
-      covenant: SANTANDER_CONFIG.COVENANT_CODE,
-      participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
-      dictKey: SANTANDER_CONFIG.DICT_KEY
-    };
+      const payload = {
+        dueDate: new Date(dadosBoleto.dueDate).toISOString().split('T')[0], // garante YYYY-MM-DD
+        amount: Number(dadosBoleto.amount),
+        clientNumber: String(dadosBoleto.clientNumber),
+        nsu: nsuCode,
+        bankNumber: Number(bankNumber),
+        payer: {
+          name: String(dadosBoleto.payer.name),
+          documentNumber: String(dadosBoleto.payer.document).replace(/\D/g, '') // só números
+        },
+        covenant: String(SANTANDER_CONFIG.COVENANT_CODE),
+        participantCode: String(SANTANDER_CONFIG.PARTICIPANT_CODE),
+        dictKey: String(SANTANDER_CONFIG.DICT_KEY)
+      };
+
 
     const boletoResponse = await axios.post(
       `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips`,
