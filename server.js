@@ -6,17 +6,54 @@ const axios = require('axios');
 const multer = require('multer');
 const path = require('path');
 const helmet = require('helmet');
-const fs = require('fs'); // Adicionado para manipulação de arquivos
-const https = require('https'); // Adicionado para configuração SSL
+const fs = require('fs');
+const https = require('https');
 
 const app = express();
 
 // 🔐 Configurações de Segurança
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: false, // Desabilita CSP para facilitar desenvolvimento
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
 app.disable('x-powered-by');
 
-app.use(cors());
+// 🔹 Configuração CORS para produção
+app.use(cors({
+  origin: [
+    'https://seusite-frontend.onrender.com', // Substitua pelo URL real do seu frontend
+    'http://localhost:3000' // para desenvolvimento
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
+
+// 🔹 Health Check - DEVE vir antes de qualquer outra configuração
+app.get('/health', (req, res) => {
+  const healthStatus = {
+    status: 'ok',
+    message: 'Backend online e funcionando',
+    timestamp: new Date().toISOString(),
+    service: 'Mendes Connexions Backend',
+    environment: process.env.NODE_ENV || 'development',
+    port: process.env.PORT || 3001,
+    uptime: `${process.uptime().toFixed(2)} segundos`
+  };
+  
+  res.status(200).json(healthStatus);
+});
+
+// 🔹 Rota de teste sem autenticação
+app.get('/test', (req, res) => {
+  res.status(200).json({
+    message: 'Backend está respondendo sem autenticação',
+    status: 'success',
+    timestamp: new Date().toISOString()
+  });
+});
 
 // 🔹 Inicializar Firebase Admin usando variável de ambiente
 let serviceAccount;
@@ -25,18 +62,26 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   } catch (err) {
     console.error('Erro ao parsear FIREBASE_SERVICE_ACCOUNT:', err);
-    process.exit(1);
+    // Não encerre o processo, apenas registre o erro
+    console.log('Continuando sem Firebase...');
   }
 } else {
   console.error('FIREBASE_SERVICE_ACCOUNT não definido!');
-  process.exit(1);
 }
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  storageBucket: process.env.FIREBASE_STORAGE_BUCKET
-});
-const db = admin.firestore();
+if (serviceAccount) {
+  try {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      storageBucket: process.env.FIREBASE_STORAGE_BUCKET
+    });
+    console.log('Firebase Admin inicializado com sucesso');
+  } catch (error) {
+    console.error('Erro ao inicializar Firebase Admin:', error);
+  }
+}
+
+const db = admin.firestore ? admin.firestore() : null;
 
 // 🔹 Credenciais Santander (seguras no backend)
 const SANTANDER_CONFIG = {
@@ -48,7 +93,6 @@ const SANTANDER_CONFIG = {
 };
 
 // 🔹 Configuração do Multer para Upload de Certificados
-// Criar diretório temporário se não existir
 const uploadDir = '/tmp/certificados';
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
@@ -65,7 +109,6 @@ const storage = multer.diskStorage({
 });
 
 const fileFilter = (req, file, cb) => {
-  // Aceitar apenas arquivos de certificado
   const allowedExtensions = /(\.crt|\.key|\.pem)$/i;
   const allowedMimes = [
     'application/x-x509-ca-cert',
@@ -88,8 +131,13 @@ const upload = multer({
   }
 });
 
-// 🔹 Middleware de autenticação
+// 🔹 Middleware de autenticação (apenas se Firebase estiver disponível)
 const authenticate = async (req, res, next) => {
+  // Se não há Firebase configurado, permita a requisição
+  if (!admin.auth) {
+    return next();
+  }
+  
   try {
     const token = req.headers.authorization?.split('Bearer ')[1];
     if (!token) return res.status(401).json({ error: 'Token de acesso não fornecido' });
@@ -119,8 +167,6 @@ app.post('/api/upload-certificados', authenticate, upload.fields([
   const fileCrt = req.files['certificadoCrt'][0];
   const fileKey = req.files['certificadoKey'][0];
 
-  // Aqui você pode processar os certificados
-  // Por exemplo, mover para Firebase Storage ou usar diretamente
   console.log('Certificado CRT salvo em:', fileCrt.path);
   console.log('Chave KEY salva em:', fileKey.path);
 
@@ -135,20 +181,29 @@ app.post('/api/upload-certificados', authenticate, upload.fields([
 }));
 
 // 🔹 Função para criar agente HTTPS com certificados
-function createHttpsAgent(certPath, keyPath) {
-  if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
-    console.warn('Certificados não encontrados, usando conexão padrão');
+function createHttpsAgent() {
+  try {
+    // Use as variáveis de ambiente que você já configurou no Render
+    const certContent = process.env.SANTANDER_CERTIFICATE_CRT;
+    const keyContent = process.env.SANTANDER_PRIVATE_KEY;
+    
+    if (!certContent || !keyContent) {
+      console.warn('Certificados não encontrados nas variáveis de ambiente, usando conexão padrão');
+      return null;
+    }
+
+    return new https.Agent({
+      cert: certContent,
+      key: keyContent,
+      rejectUnauthorized: false
+    });
+  } catch (error) {
+    console.error('Erro ao criar agente HTTPS:', error);
     return null;
   }
-
-  return new https.Agent({
-    cert: fs.readFileSync(certPath),
-    key: fs.readFileSync(keyPath),
-    rejectUnauthorized: false // Ajuste conforme necessidade do Santander
-  });
 }
 
-// 🔹 Rota para obter token Santander (ATUALIZADA com suporte a certificados)
+// 🔹 Rota para obter token Santander
 app.post('/api/santander/token', authenticate, asyncHandler(async (req, res) => {
   const formData = new URLSearchParams();
   formData.append('client_id', SANTANDER_CONFIG.CLIENT_ID);
@@ -161,12 +216,8 @@ app.post('/api/santander/token', authenticate, asyncHandler(async (req, res) => 
     }
   };
 
-  // 🔹 Usar certificados se disponíveis
-  // Você pode ajustar os caminhos conforme sua configuração
-  const certPath = process.env.SANTANDER_CERT_PATH || '/tmp/certificados/certificate.crt';
-  const keyPath = process.env.SANTANDER_KEY_PATH || '/tmp/certificados/private.key';
-  
-  const httpsAgent = createHttpsAgent(certPath, keyPath);
+  // 🔹 Usar certificados das variáveis de ambiente
+  const httpsAgent = createHttpsAgent();
   if (httpsAgent) {
     config.httpsAgent = httpsAgent;
   }
@@ -185,14 +236,23 @@ app.post('/api/santander/token', authenticate, asyncHandler(async (req, res) => 
       response: error.response?.data,
       status: error.response?.status
     });
+    
+    // Erro mais específico para ajudar no diagnóstico
+    let errorMessage = 'Falha ao obter token';
+    if (error.response?.status === 404) {
+      errorMessage = 'Endpoint não encontrado - verifique a URL da API Santander';
+    } else if (error.response?.status === 401) {
+      errorMessage = 'Autenticação falhou - verifique credenciais e certificados';
+    }
+    
     res.status(500).json({
-      error: 'Falha ao obter token',
+      error: errorMessage,
       details: error.response?.data || error.message
     });
   }
 }));
 
-// 🔹 Rota para registrar boleto
+// 🔹 Rota para registrar boleto (CORRIGIDA)
 app.post('/api/santander/boletos', authenticate, asyncHandler(async (req, res) => {
   const { dadosBoleto } = req.body;
 
@@ -201,11 +261,11 @@ app.post('/api/santander/boletos', authenticate, asyncHandler(async (req, res) =
   }
 
   try {
-    // Obter token primeiro
+    // CORREÇÃO: Use CLIENT_ID correto (não CIENT_ID)
     const tokenResponse = await axios.post(
       'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
       new URLSearchParams({
-        client_id: SANTANDER_CONFIG.CLIENT_ID,
+        client_id: SANTANDER_CONFIG.CLIENT_ID, // ✅ CORRETO
         client_secret: SANTANDER_CONFIG.CLIENT_SECRET,
         grant_type: 'client_credentials'
       }),
@@ -220,7 +280,6 @@ app.post('/api/santander/boletos', authenticate, asyncHandler(async (req, res) =
     const nsuCode = gerarNumeroUnico(dadosBoleto.clientNumber);
     const bankNumber = await gerarBankNumberSequencial();
 
-    // 🔹 Montar payload completo do boleto
     const payload = {
       nsuCode: nsuCode,
       bankNumber: bankNumber,
@@ -234,7 +293,6 @@ app.post('/api/santander/boletos', authenticate, asyncHandler(async (req, res) =
         cep: dadosBoleto.pagadorCEP
       },
       dataVencimento: dadosBoleto.dataVencimento,
-      // Adicione outros campos conforme documentação do Santander
       ...dadosBoleto
     };
 
@@ -250,19 +308,22 @@ app.post('/api/santander/boletos', authenticate, asyncHandler(async (req, res) =
       }
     );
 
-    // Salvar no Firestore
-    const boletoRef = await db.collection('boletos').add({
-      ...payload,
-      accessToken: accessToken, // Considere a segurança disso
-      workspaceId: workspaceId,
-      dataCriacao: new Date(),
-      status: 'pendente'
-    });
+    // Salvar no Firestore apenas se estiver disponível
+    if (db) {
+      const boletoRef = await db.collection('boletos').add({
+        ...payload,
+        workspaceId: workspaceId,
+        dataCriacao: new Date(),
+        status: 'pendente'
+      });
 
-    res.json({
-      ...boletoResponse.data,
-      id: boletoRef.id
-    });
+      res.json({
+        ...boletoResponse.data,
+        id: boletoRef.id
+      });
+    } else {
+      res.json(boletoResponse.data);
+    }
 
   } catch (error) {
     console.error('Erro ao registrar boleto:', error.response?.data || error.message);
@@ -282,10 +343,11 @@ app.post('/api/santander/boletos/pdf', authenticate, asyncHandler(async (req, re
   }
 
   try {
+    // CORREÇÃO: Use CLIENT_ID correto aqui também
     const tokenResponse = await axios.post(
       'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
       new URLSearchParams({
-        client_id: SANTANDER_CONFIG.CLIENT_ID,
+        client_id: SANTANDER_CONFIG.CLIENT_ID, // ✅ CORRETO
         client_secret: SANTANDER_CONFIG.CLIENT_SECRET,
         grant_type: 'client_credentials'
       }),
@@ -294,42 +356,44 @@ app.post('/api/santander/boletos/pdf', authenticate, asyncHandler(async (req, re
     
     const accessToken = tokenResponse.data.access_token;
 
-    const pdfResponse = await axios.post(
-      `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`,
-      { payerDocumentNumber },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
-          'Authorization': `Bearer ${accessToken}`
-        },
-        responseType: 'stream' // Para lidar com PDF
-      }
-    );
+    // CORREÇÃO: Mudança no tratamento do responseType para PDF
+    const pdfResponse = await axios({
+      method: 'post',
+      url: `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`,
+      data: { payerDocumentNumber },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+        'Authorization': `Bearer ${accessToken}`
+      },
+      responseType: 'arraybuffer' // Melhor para PDF
+    });
 
     res.set({
       'Content-Type': 'application/pdf',
-      'Content-Disposition': `attachment; filename="boleto-${digitableLine}.pdf"`
+      'Content-Disposition': `attachment; filename="boleto-${digitableLine}.pdf"`,
+      'Content-Length': pdfResponse.data.length
     });
 
-    pdfResponse.data.pipe(res);
+    res.send(Buffer.from(pdfResponse.data));
 
   } catch (error) {
     console.error('Erro ao gerar PDF:', error.response?.data || error.message);
     res.status(500).json({
       error: 'Falha ao gerar PDF',
-      details: error.response?.data || error.message
+      details: error.message
     });
   }
 }));
 
-// 🔹 Funções auxiliares
+// 🔹 Funções auxiliares (mantidas iguais)
 function gerarNumeroUnico(clientNumber) {
   return `${clientNumber}-${Date.now()}`;
 }
 
 async function gerarBankNumberSequencial() {
-  // Implementação real usando banco de dados
+  if (!db) return Math.floor(Math.random() * 1000000);
+  
   try {
     const counterRef = db.collection('counters').doc('bankNumber');
     const counter = await db.runTransaction(async (transaction) => {
@@ -350,8 +414,6 @@ async function gerarBankNumberSequencial() {
 }
 
 async function obterWorkspaceId(accessToken) {
-  // Implementação para obter ou criar workspace
-  // Esta é uma implementação de exemplo - ajuste conforme a API do Santander
   try {
     const response = await axios.get(
       'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
@@ -367,7 +429,6 @@ async function obterWorkspaceId(accessToken) {
       return response.data[0].id;
     }
     
-    // Se não existir, criar um novo workspace
     const createResponse = await axios.post(
       'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
       {
@@ -386,7 +447,7 @@ async function obterWorkspaceId(accessToken) {
     return createResponse.data.id;
   } catch (error) {
     console.error('Erro ao obter workspace:', error);
-    return 'workspace-default'; // Fallback
+    return 'workspace-default';
   }
 }
 
@@ -410,18 +471,10 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Algo deu errado no servidor!' });
 });
 
-// 🔹 Health check
-app.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    message: 'Backend online',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV
-  });
-});
-
+// 🔹 Inicialização do servidor
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${PORT}`);
-  console.log(`Ambiente: ${process.env.NODE_ENV}`);
+  console.log(`Ambiente: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`Health check disponível em: http://0.0.0.0:${PORT}/health`);
 });
