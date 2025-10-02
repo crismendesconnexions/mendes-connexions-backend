@@ -3,15 +3,12 @@ const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const axios = require('axios');
-const multer = require('multer');
-const path = require('path');
 const helmet = require('helmet');
-const fs = require('fs');
 const https = require('https');
 
 const app = express();
 
-// 🔐 Segurança
+// Segurança
 app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: "cross-origin" } }));
 app.disable('x-powered-by');
 
@@ -27,7 +24,7 @@ app.use(cors({
 app.options('*', cors());
 app.use(express.json());
 
-// 🔹 Health Check
+// Health Check
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'ok',
@@ -40,7 +37,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-// 🔹 Firebase
+// Firebase
 let serviceAccount;
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
   try {
@@ -62,16 +59,14 @@ if (serviceAccount) {
 }
 const db = admin.firestore ? admin.firestore() : null;
 
-// 🔹 Config Santander
+// Config Santander
 const SANTANDER_CONFIG = {
   CLIENT_ID: process.env.SANTANDER_CLIENT_ID,
   CLIENT_SECRET: process.env.SANTANDER_CLIENT_SECRET,
-  COVENANT_CODE: process.env.SANTANDER_COVENANT_CODE,
-  PARTICIPANT_CODE: process.env.SANTANDER_PARTICIPANT_CODE,
-  DICT_KEY: process.env.SANTANDER_DICT_KEY
+  COVENANT_CODE: process.env.SANTANDER_COVENANT_CODE || "178622"
 };
 
-// 🔹 Agente HTTPS Santander
+// Agente HTTPS Santander
 function createHttpsAgent() {
   try {
     const certBase64 = process.env.SANTANDER_CERTIFICATE_CRT_B64;
@@ -89,7 +84,7 @@ function createHttpsAgent() {
   }
 }
 
-// 🔹 Obter token Santander
+// Obter token Santander
 async function obterTokenSantander() {
   console.log("\n=== [1] Solicitando TOKEN Santander ===");
   const formData = new URLSearchParams({
@@ -108,7 +103,7 @@ async function obterTokenSantander() {
   return response.data.access_token;
 }
 
-// 🔹 Criar Workspace
+// Criar Workspace
 async function criarWorkspace(accessToken) {
   console.log("\n=== [2] Criando WORKSPACE ===");
   const payload = {
@@ -135,35 +130,60 @@ async function criarWorkspace(accessToken) {
   return response.data.id;
 }
 
-// 🔹 Registrar boleto
+// Função utilitária: calcular 5º dia útil do próximo mês
+function calcularQuintoDiaUtilProximoMes() {
+  const hoje = new Date();
+  const ano = hoje.getFullYear();
+  const mes = hoje.getMonth() + 1; // próximo mês
+  const data = new Date(ano, mes, 1); // primeiro dia do próximo mês
+  let diasUteis = 0;
+  while (true) {
+    const diaSemana = data.getDay(); // 0=domingo ... 6=sábado
+    if (diaSemana !== 0 && diaSemana !== 6) {
+      diasUteis++;
+      if (diasUteis === 5) break;
+    }
+    data.setDate(data.getDate() + 1);
+  }
+  return data.toISOString().split('T')[0];
+}
+
+// Registrar boleto
 app.post('/api/santander/boletos', async (req, res) => {
   const { dadosBoleto } = req.body;
   if (!dadosBoleto) return res.status(400).json({ error: 'Dados do boleto não fornecidos' });
 
   try {
-    // 1 - Token
     const accessToken = await obterTokenSantander();
-
-    // 2 - Workspace
     const workspaceId = await criarWorkspace(accessToken);
 
-    // 3 - Registrar boleto
     console.log("\n=== [3] Registrando BOLETO ===");
+
+    const hoje = new Date().toISOString().split('T')[0];
+    const dueDate = calcularQuintoDiaUtilProximoMes();
+
     const payload = {
       nsuCode: `${dadosBoleto.clientNumber}-${Date.now()}`,
-      bankNumber: await gerarBankNumberSequencial(),
-      valor: dadosBoleto.valor,
-      pagador: {
-        nome: dadosBoleto.pagadorNome,
-        documento: dadosBoleto.pagadorDocumento,
-        endereco: dadosBoleto.pagadorEndereco,
-        cidade: dadosBoleto.pagadorCidade,
-        estado: dadosBoleto.pagadorEstado,
-        cep: dadosBoleto.pagadorCEP
-      },
-      dataVencimento: dadosBoleto.dataVencimento,
-      ...dadosBoleto
+      nsuDate: hoje,
+      paymentType: "REGISTRO",
+      issueDate: hoje,
+      dueDate: dueDate,
+      covenantCode: parseInt(SANTANDER_CONFIG.COVENANT_CODE),
+      environment: "PRODUCAO",
+      nominalValue: dadosBoleto.valorCompra,
+      documentKind: "DUPLICATA_MERCANTIL",
+
+      // Pagador
+      payer: {
+        name: dadosBoleto.pagadorNome,
+        document: dadosBoleto.pagadorDocumento,
+        address: dadosBoleto.pagadorEndereco,
+        city: dadosBoleto.pagadorCidade,
+        state: dadosBoleto.pagadorEstado,
+        zipCode: dadosBoleto.pagadorCEP
+      }
     };
+
     console.log("➡️ Payload Boleto:", payload);
 
     const boletoResponse = await axios.post(
@@ -180,26 +200,7 @@ app.post('/api/santander/boletos', async (req, res) => {
     );
 
     console.log("✅ Boleto registrado:", boletoResponse.data);
-
-    // 4 - PDF
-    console.log("\n=== [4] Baixando PDF do BOLETO ===");
-    const pdfResponse = await axios({
-      method: 'post',
-      url: `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${boletoResponse.data.digitableLine}/bank_slips`,
-      data: { payerDocumentNumber: dadosBoleto.pagadorDocumento },
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
-        'Authorization': `Bearer ${accessToken}`
-      },
-      httpsAgent: createHttpsAgent(),
-      responseType: 'arraybuffer'
-    });
-
-    console.log("✅ PDF obtido com sucesso (bytes):", pdfResponse.data.length);
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.send(Buffer.from(pdfResponse.data));
+    res.json(boletoResponse.data);
 
   } catch (error) {
     console.error("❌ Erro no fluxo Santander:", error.response?.data || error.message);
@@ -210,7 +211,7 @@ app.post('/api/santander/boletos', async (req, res) => {
   }
 });
 
-// 🔹 Auxiliar sequencial
+// Auxiliar sequencial
 async function gerarBankNumberSequencial() {
   if (!db) return Math.floor(Math.random() * 1000000);
   try {
@@ -226,14 +227,14 @@ async function gerarBankNumberSequencial() {
   }
 }
 
-// 🔹 Handlers globais
+// Handlers globais
 app.use((req, res) => res.status(404).json({ error: "Rota não encontrada" }));
 app.use((err, req, res, next) => {
   console.error('Erro global:', err.stack);
   res.status(500).json({ error: 'Algo deu errado no servidor!' });
 });
 
-// 🔹 Inicialização
+// Inicialização
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${PORT}`);
