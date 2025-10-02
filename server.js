@@ -18,19 +18,21 @@ app.use(helmet({
 }));
 app.disable('x-powered-by');
 
-// 🔹 Configuração CORS para produção
+// 🔹 Configuração CORS CORRETA para produção
 app.use(cors({
   origin: [
-    'https://seusite-frontend.onrender.com', // Substitua pelo URL real do seu frontend
-    'http://localhost:3000' // para desenvolvimento
+    'https://mendesconnexions.com.br',
+    'https://www.mendesconnexions.com.br'
   ],
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
-app.use(express.json());
+// 🔹 ESTA LINHA É OBRIGATÓRIA
+app.options('*', cors());
 
+app.use(express.json());
 // 🔹 Health Check - DEVE vir antes de qualquer outra configuração
 app.get('/health', (req, res) => {
   const healthStatus = {
@@ -329,7 +331,7 @@ app.post('/api/santander/boletos', authenticate, asyncHandler(async (req, res) =
     console.error('Erro ao registrar boleto:', error.response?.data || error.message);
     res.status(500).json({
       error: 'Falha ao registrar boleto',
-      details: error.response?.data || error.message
+      details: error.response?.data || error.messagea
     });
   }
 }));
