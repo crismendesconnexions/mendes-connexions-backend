@@ -161,6 +161,19 @@ function calcularQuintoDiaUtilProximoMes() {
   return data.toISOString().split('T')[0];
 }
 
+// Função para gerar nsuDate no formato YYYY-MM-DD
+function gerarNsuDate() {
+  const hoje = new Date();
+  return hoje.toISOString().split('T')[0];
+}
+
+// Função para gerar issueDate = hoje + 1 dia
+function gerarIssueDate() {
+  const hoje = new Date();
+  hoje.setDate(hoje.getDate() + 1);
+  return hoje.toISOString().split('T')[0];
+}
+
 // Registrar boleto
 app.post('/api/santander/boletos', async (req, res) => {
   const { dadosBoleto } = req.body;
@@ -172,21 +185,18 @@ app.post('/api/santander/boletos', async (req, res) => {
 
     console.log("\n=== [3] Registrando BOLETO ===");
 
-    const hoje = new Date().toISOString();
     const dueDate = calcularQuintoDiaUtilProximoMes();
 
     const payload = {
-      nsuCode: `${dadosBoleto.clientNumber}-${Date.now()}`, // NSU único
-      nsuDate: hoje, // Data/hora da criação do NSU
+      nsuCode: `${dadosBoleto.clientNumber}${Date.now()}`, // apenas números
+      nsuDate: gerarNsuDate(),                              // YYYY-MM-DD
       paymentType: "REGISTRO",
-      issueDate: hoje.split('T')[0],
+      issueDate: gerarIssueDate(),                          // hoje + 1 dia
       dueDate: dueDate,
       covenantCode: parseInt(SANTANDER_CONFIG.COVENANT_CODE),
       environment: "PRODUCAO",
       nominalValue: dadosBoleto.valorCompra,
       documentKind: "DUPLICATA_MERCANTIL",
-
-      // Pagador
       payer: {
         name: dadosBoleto.pagadorNome,
         document: dadosBoleto.pagadorDocumento,
@@ -254,3 +264,4 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`Ambiente: ${process.env.NODE_ENV || 'development'}`);
   console.log(`Health check: http://0.0.0.0:${PORT}/health`);
 });
+
