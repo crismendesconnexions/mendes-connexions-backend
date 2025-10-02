@@ -264,17 +264,25 @@ app.post('/api/santander/boletos', authenticate, asyncHandler(async (req, res) =
 
   try {
     // CORREÇÃO: Use CLIENT_ID correto (não CIENT_ID)
-    const tokenResponse = await axios.post(
-      'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
-      new URLSearchParams({
-        client_id: SANTANDER_CONFIG.CLIENT_ID, // ✅ CORRETO
-        client_secret: SANTANDER_CONFIG.CLIENT_SECRET,
-        grant_type: 'client_credentials'
-      }),
-      {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-      }
-    );
+      const basicAuth = Buffer.from(
+        `${SANTANDER_CONFIG.CLIENT_ID}:${SANTANDER_CONFIG.CLIENT_SECRET}`
+      ).toString('base64');
+
+      const tokenResponse = await axios.post(
+        'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
+        new URLSearchParams({
+          grant_type: 'client_credentials',
+          scope: 'urn:opc:resource:token'
+        }),
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Authorization': `Basic ${basicAuth}`
+          },
+          httpsAgent: createHttpsAgent() // ✅ se precisar dos certificados
+        }
+      );
+
     
     const accessToken = tokenResponse.data.access_token;
     const workspaceId = await obterWorkspaceId(accessToken);
