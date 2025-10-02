@@ -12,6 +12,7 @@ const app = express();
 app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: "cross-origin" } }));
 app.disable('x-powered-by');
 
+// CORS
 app.use(cors({
   origin: [
     'https://mendesconnexions.com.br',
@@ -46,6 +47,7 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     console.error('Erro ao parsear FIREBASE_SERVICE_ACCOUNT:', err);
   }
 }
+
 if (serviceAccount) {
   try {
     admin.initializeApp({
@@ -57,6 +59,7 @@ if (serviceAccount) {
     console.error('Erro ao inicializar Firebase Admin:', error);
   }
 }
+
 const db = admin.firestore ? admin.firestore() : null;
 
 // Config Santander
@@ -93,14 +96,18 @@ async function obterTokenSantander() {
     grant_type: 'client_credentials'
   });
 
-  const response = await axios.post(
-    'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
-    formData,
-    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, httpsAgent: createHttpsAgent() }
-  );
-
-  console.log("✅ Token recebido:", response.data);
-  return response.data.access_token;
+  try {
+    const response = await axios.post(
+      'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
+      formData,
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, httpsAgent: createHttpsAgent() }
+    );
+    console.log("✅ Token recebido");
+    return response.data.access_token;
+  } catch (err) {
+    console.error("❌ Erro ao obter token Santander:", err.response?.data || err.message);
+    throw err;
+  }
 }
 
 // Criar Workspace
@@ -113,38 +120,44 @@ async function criarWorkspace(accessToken) {
   };
   console.log("➡️ Payload Workspace:", payload);
 
-  const response = await axios.post(
-    'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
-    payload,
-    {
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${accessToken}`,
-        'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID
-      },
-      httpsAgent: createHttpsAgent()
-    }
-  );
-
-  console.log("✅ Workspace criada:", response.data);
-  return response.data.id;
+  try {
+    const response = await axios.post(
+      'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
+      payload,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`,
+          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID
+        },
+        httpsAgent: createHttpsAgent()
+      }
+    );
+    console.log("✅ Workspace criada:", response.data.id);
+    return response.data.id;
+  } catch (err) {
+    console.error("❌ Erro ao criar workspace:", err.response?.data || err.message);
+    throw err;
+  }
 }
 
-// Função utilitária: calcular 5º dia útil do próximo mês
+// Calcular 5º dia útil do próximo mês
 function calcularQuintoDiaUtilProximoMes() {
   const hoje = new Date();
   const ano = hoje.getFullYear();
   const mes = hoje.getMonth() + 1; // próximo mês
   const data = new Date(ano, mes, 1); // primeiro dia do próximo mês
   let diasUteis = 0;
+
   while (true) {
-    const diaSemana = data.getDay(); // 0=domingo ... 6=sábado
+    const diaSemana = data.getDay();
     if (diaSemana !== 0 && diaSemana !== 6) {
       diasUteis++;
       if (diasUteis === 5) break;
     }
     data.setDate(data.getDate() + 1);
   }
+
   return data.toISOString().split('T')[0];
 }
 
@@ -159,14 +172,14 @@ app.post('/api/santander/boletos', async (req, res) => {
 
     console.log("\n=== [3] Registrando BOLETO ===");
 
-    const hoje = new Date().toISOString().split('T')[0];
+    const hoje = new Date().toISOString();
     const dueDate = calcularQuintoDiaUtilProximoMes();
 
     const payload = {
-      nsuCode: `${dadosBoleto.clientNumber}-${Date.now()}`,
-      nsuDate: hoje,
+      nsuCode: `${dadosBoleto.clientNumber}-${Date.now()}`, // NSU único
+      nsuDate: hoje, // Data/hora da criação do NSU
       paymentType: "REGISTRO",
-      issueDate: hoje,
+      issueDate: hoje.split('T')[0],
       dueDate: dueDate,
       covenantCode: parseInt(SANTANDER_CONFIG.COVENANT_CODE),
       environment: "PRODUCAO",
@@ -211,7 +224,7 @@ app.post('/api/santander/boletos', async (req, res) => {
   }
 });
 
-// Auxiliar sequencial
+// Auxiliar sequencial (Firebase)
 async function gerarBankNumberSequencial() {
   if (!db) return Math.floor(Math.random() * 1000000);
   try {
