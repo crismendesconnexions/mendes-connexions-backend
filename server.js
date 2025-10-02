@@ -161,44 +161,41 @@ function createHttpsAgent() {
   }
 }
 
-// 🔹 Obter token Santander (com log detalhado)
-async function obterTokenSantander() {
-  console.log('🔹 Solicitando token Santander...');
-  const response = await axios.post(
-    'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
-    new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: SANTANDER_CONFIG.CLIENT_ID,
-      client_secret: SANTANDER_CONFIG.CLIENT_SECRET
-    }),
-    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, httpsAgent: createHttpsAgent() }
-  );
-  console.log('✅ Token obtido:', response.data.access_token);
-  return response.data.access_token;
-}
-
-// 🔹 Obter ou criar workspace (com log detalhado)
-async function obterWorkspaceId(accessToken) {
+// 🔹 Obter token Santander
+app.post('/api/santander/token', authenticate, asyncHandler(async (req, res) => {
   try {
-    console.log('🔹 Consultando workspaces existentes...');
-    const response = await axios.get(
-      'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
-      {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
-          'covenantCode': SANTANDER_CONFIG.COVENANT_CODE,
-          'participantCode': SANTANDER_CONFIG.PARTICIPANT_CODE
-        }
-      }
-    );
-    console.log('✅ Resposta workspaces:', response.status, response.data);
-    if (response.data && response.data.length > 0) return response.data[0].id;
+    console.log('🔹 Requisição de token Santander...');
+    const formData = new URLSearchParams();
+    formData.append('client_id', SANTANDER_CONFIG.CLIENT_ID);
+    formData.append('client_secret', SANTANDER_CONFIG.CLIENT_SECRET);
+    formData.append('grant_type', 'client_credentials');
 
-    console.log('🔹 Nenhum workspace encontrado, criando...');
-    const createResponse = await axios.post(
+    const config = { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } };
+    const httpsAgent = createHttpsAgent();
+    if (httpsAgent) config.httpsAgent = httpsAgent;
+
+    const response = await axios.post(
+      'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
+      formData,
+      config
+    );
+
+    console.log('✅ Token gerado:', response.data.access_token);
+    res.json(response.data);
+  } catch (error) {
+    console.error('❌ Erro token Santander:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Falha ao obter token', details: error.response?.data || error.message });
+  }
+}));
+
+// 🔹 Criar workspace sempre
+async function criarWorkspace(accessToken) {
+  try {
+    console.log('🔹 Criando workspace no Santander...');
+    const payload = { name: 'Workspace Principal', description: 'Workspace para gestão de boletos' };
+    const response = await axios.post(
       'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
-      { name: 'Workspace Principal' },
+      payload,
       {
         headers: {
           'Content-Type': 'application/json',
@@ -206,32 +203,39 @@ async function obterWorkspaceId(accessToken) {
           'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
           'covenantCode': SANTANDER_CONFIG.COVENANT_CODE,
           'participantCode': SANTANDER_CONFIG.PARTICIPANT_CODE
-        }
+        },
+        httpsAgent: createHttpsAgent()
       }
     );
-    console.log('✅ Workspace criado:', createResponse.data);
-    return createResponse.data.id;
+    console.log('✅ Workspace criado com sucesso:', response.data.id);
+    return response.data.id;
   } catch (error) {
-    console.error('❌ ERRO workspace Santander:', error.response?.status, error.response?.data || error.message);
-    throw new Error('Não foi possível obter ou criar workspace');
+    console.error('❌ Erro ao criar workspace:', error.response?.data || error.message);
+    throw new Error('Não foi possível criar workspace');
   }
 }
 
-// 🔹 Registrar boleto com logs detalhados
+// 🔹 Registrar boleto
 app.post('/api/santander/boletos', authenticate, asyncHandler(async (req, res) => {
   const { dadosBoleto } = req.body;
   if (!dadosBoleto) return res.status(400).json({ error: 'Dados do boleto não fornecidos' });
 
   try {
-    console.log('=== INÍCIO DO PROCESSO DE REGISTRO DE BOLETO ===');
+    console.log('🔹 Gerando token antes de criar workspace...');
+    const tokenResponse = await axios.post(
+      'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
+      new URLSearchParams({
+        client_id: SANTANDER_CONFIG.CLIENT_ID,
+        client_secret: SANTANDER_CONFIG.CLIENT_SECRET,
+        grant_type: 'client_credentials'
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, httpsAgent: createHttpsAgent() }
+    );
+    const accessToken = tokenResponse.data.access_token;
+    console.log('✅ Token obtido:', accessToken);
 
-    // 1️⃣ Obter token
-    const accessToken = await obterTokenSantander();
+    const workspaceId = await criarWorkspace(accessToken);
 
-    // 2️⃣ Obter ou criar workspace
-    const workspaceId = await obterWorkspaceId(accessToken);
-
-    // 3️⃣ Preparar payload do boleto
     const payload = {
       nsuCode: `${dadosBoleto.clientNumber}-${Date.now()}`,
       bankNumber: await gerarBankNumberSequencial(),
@@ -247,9 +251,7 @@ app.post('/api/santander/boletos', authenticate, asyncHandler(async (req, res) =
       dataVencimento: dadosBoleto.dataVencimento,
       ...dadosBoleto
     };
-    console.log('✅ Payload preparado:', payload);
 
-    // 4️⃣ Registrar boleto
     console.log('🔹 Registrando boleto...');
     const boletoResponse = await axios.post(
       `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips`,
@@ -263,42 +265,42 @@ app.post('/api/santander/boletos', authenticate, asyncHandler(async (req, res) =
         httpsAgent: createHttpsAgent()
       }
     );
-    console.log('✅ Boleto registrado:', boletoResponse.data);
 
-    // 5️⃣ Salvar no Firestore se disponível
+    console.log('✅ Boleto registrado com sucesso:', boletoResponse.data);
+
     if (db) {
-      console.log('🔹 Salvando boleto no Firestore...');
-      const boletoRef = await db.collection('boletos').add({
-        ...payload,
-        workspaceId,
-        status: 'pendente',
-        dataCriacao: new Date()
-      });
-      console.log('✅ Boleto salvo com ID:', boletoRef.id);
+      const boletoRef = await db.collection('boletos').add({ ...payload, workspaceId, status: 'pendente', dataCriacao: new Date() });
       res.json({ ...boletoResponse.data, id: boletoRef.id });
     } else {
       res.json(boletoResponse.data);
     }
 
-    console.log('=== FIM DO PROCESSO DE REGISTRO DE BOLETO ===');
-
   } catch (error) {
-    console.error('❌ ERRO AO REGISTRAR BOLETO:', error.response?.data || error.message);
+    console.error('❌ Erro ao registrar boleto:', error.response?.data || error.message);
     res.status(500).json({ error: 'Falha ao registrar boleto', details: error.response?.data || error.message });
   }
 }));
 
-// 🔹 Gerar PDF do boleto com logs detalhados
+// 🔹 Gerar PDF boleto
 app.post('/api/santander/boletos/pdf', authenticate, asyncHandler(async (req, res) => {
   const { digitableLine, payerDocumentNumber } = req.body;
-  if (!digitableLine || !payerDocumentNumber)
-    return res.status(400).json({ error: 'Linha digitável e documento obrigatórios' });
+  if (!digitableLine || !payerDocumentNumber) return res.status(400).json({ error: 'Linha digitável e documento obrigatórios' });
 
   try {
-    console.log('=== INÍCIO DO PROCESSO DE GERAÇÃO DE PDF ===');
-    const accessToken = await obterTokenSantander();
+    console.log('🔹 Gerando token para PDF...');
+    const tokenResponse = await axios.post(
+      'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
+      new URLSearchParams({
+        client_id: SANTANDER_CONFIG.CLIENT_ID,
+        client_secret: SANTANDER_CONFIG.CLIENT_SECRET,
+        grant_type: 'client_credentials'
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+    const accessToken = tokenResponse.data.access_token;
+    console.log('✅ Token obtido para PDF:', accessToken);
 
-    console.log('🔹 Solicitando PDF do boleto...');
+    console.log('🔹 Requisitando PDF do boleto...');
     const pdfResponse = await axios({
       method: 'post',
       url: `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`,
@@ -310,18 +312,17 @@ app.post('/api/santander/boletos/pdf', authenticate, asyncHandler(async (req, re
       },
       responseType: 'arraybuffer'
     });
-    console.log('✅ PDF recebido, tamanho:', pdfResponse.data.length);
 
+    console.log('✅ PDF obtido com sucesso, enviando ao cliente...');
     res.set({
       'Content-Type': 'application/pdf',
       'Content-Disposition': `attachment; filename="boleto-${digitableLine}.pdf"`,
       'Content-Length': pdfResponse.data.length
     });
     res.send(Buffer.from(pdfResponse.data));
-    console.log('=== FIM DO PROCESSO DE GERAÇÃO DE PDF ===');
 
   } catch (error) {
-    console.error('❌ ERRO AO GERAR PDF:', error.response?.data || error.message);
+    console.error('❌ Erro gerar PDF:', error.response?.data || error.message);
     res.status(500).json({ error: 'Falha ao gerar PDF', details: error.message });
   }
 }));
@@ -360,4 +361,3 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`Ambiente: ${process.env.NODE_ENV || 'development'}`);
   console.log(`Health check: http://0.0.0.0:${PORT}/health`);
 });
-
