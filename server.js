@@ -3,18 +3,18 @@ const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const axios = require('axios');
-const fs = require('fs');
+const multer = require('multer');
 const path = require('path');
 const helmet = require('helmet');
+const fs = require('fs');
 const https = require('https');
 
 const app = express();
 
 // 🔐 Segurança
-app.use(helmet({ contentSecurityPolicy: false }));
+app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: "cross-origin" } }));
 app.disable('x-powered-by');
 
-// 🔹 CORS
 app.use(cors({
   origin: [
     'https://mendesconnexions.com.br',
@@ -32,23 +32,46 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'ok',
+    message: 'Backend online e funcionando',
     timestamp: new Date().toISOString(),
+    service: 'Mendes Connexions Backend',
     environment: process.env.NODE_ENV || 'development',
     port: process.env.PORT || 3001,
-    uptime: `${process.uptime().toFixed(2)}s`
+    uptime: `${process.uptime().toFixed(2)} segundos`
   });
 });
 
-// 🔹 Firebase Admin
+// 🔹 Rota de teste sem autenticação
+app.get('/test', (req, res) => {
+  res.status(200).json({
+    message: 'Backend está respondendo sem autenticação',
+    status: 'success',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// 🔹 Inicializar Firebase
 let serviceAccount;
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-  try { serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT); }
-  catch (err) { console.error('Erro ao parsear FIREBASE_SERVICE_ACCOUNT:', err); }
+  try {
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  } catch (err) {
+    console.error('Erro ao parsear FIREBASE_SERVICE_ACCOUNT:', err);
+  }
 }
+
 if (serviceAccount) {
-  try { admin.initializeApp({ credential: admin.credential.cert(serviceAccount), storageBucket: process.env.FIREBASE_STORAGE_BUCKET }); }
-  catch (error) { console.error('Erro ao inicializar Firebase Admin:', error); }
+  try {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      storageBucket: process.env.FIREBASE_STORAGE_BUCKET
+    });
+    console.log('Firebase Admin inicializado');
+  } catch (error) {
+    console.error('Erro ao inicializar Firebase Admin:', error);
+  }
 }
+
 const db = admin.firestore ? admin.firestore() : null;
 
 // 🔹 Config Santander
@@ -60,95 +83,141 @@ const SANTANDER_CONFIG = {
   DICT_KEY: process.env.SANTANDER_DICT_KEY
 };
 
-// 🔹 Gerar arquivos temporários de certificado
-let tempCertPaths = null;
-function prepareSantanderCertFiles() {
-  if (tempCertPaths) return tempCertPaths;
+// 🔹 Multer upload certificados
+const uploadDir = '/tmp/certificados';
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
-  const crtBase64 = process.env.SANTANDER_CERTIFICATE_CRT_B64;
-  const keyBase64 = process.env.SANTANDER_PRIVATE_KEY_B64;
-  const passphrase = process.env.PASSPHRASE || undefined;
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+    const nomeUnico = Date.now() + '-' + Math.round(Math.random() * 1E9) + path.extname(file.originalname);
+    cb(null, nomeUnico);
+  }
+});
 
-  if (!crtBase64 || !keyBase64) return null;
+const fileFilter = (req, file, cb) => {
+  const allowedExtensions = /(\.crt|\.key|\.pem)$/i;
+  const allowedMimes = [
+    'application/x-x509-ca-cert',
+    'application/x-pem-file',
+    'text/plain'
+  ];
+  if (allowedMimes.includes(file.mimetype) || allowedExtensions.test(file.originalname)) cb(null, true);
+  else cb(new Error('Apenas arquivos .crt, .key ou .pem!'), false);
+};
 
-  const tmpDir = '/tmp/santander';
-  if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+const upload = multer({ storage, fileFilter, limits: { fileSize: 5 * 1024 * 1024 } });
 
-  const crtPath = path.join(tmpDir, 'certificado.crt');
-  const keyPath = path.join(tmpDir, 'certificado.key');
-
-  fs.writeFileSync(crtPath, Buffer.from(crtBase64, 'base64').toString('utf-8'));
-  fs.writeFileSync(keyPath, Buffer.from(keyBase64, 'base64').toString('utf-8'));
-
-  tempCertPaths = { crtPath, keyPath, passphrase };
-  return tempCertPaths;
-}
-
-// 🔹 Criar HTTPS Agent
-function getSantanderAgent() {
-  const certFiles = prepareSantanderCertFiles();
-  if (!certFiles) return null;
-
-  return new https.Agent({
-    cert: fs.readFileSync(certFiles.crtPath),
-    key: fs.readFileSync(certFiles.keyPath),
-    passphrase: certFiles.passphrase,
-    rejectUnauthorized: true
-  });
-}
-
-// 🔹 Middleware autenticação
+// 🔹 Autenticação Firebase
 const authenticate = async (req, res, next) => {
   if (!admin.auth) return next();
   try {
     const token = req.headers.authorization?.split('Bearer ')[1];
     if (!token) return res.status(401).json({ error: 'Token não fornecido' });
-    req.user = await admin.auth().verifyIdToken(token);
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    req.user = decodedToken;
     next();
-  } catch { res.status(401).json({ error: 'Token inválido' }); }
+  } catch {
+    res.status(401).json({ error: 'Token inválido' });
+  }
 };
 
 // 🔹 Handler assíncrono
 const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-// 🔹 Token Santander
-app.post('/api/santander/token', authenticate, asyncHandler(async (req, res) => {
-  const formData = new URLSearchParams({
-    grant_type: 'client_credentials',
-    client_id: SANTANDER_CONFIG.CLIENT_ID,
-    client_secret: SANTANDER_CONFIG.CLIENT_SECRET
+// 🔹 Upload certificados
+app.post('/api/upload-certificados', authenticate, upload.fields([
+  { name: 'certificadoCrt', maxCount: 1 },
+  { name: 'certificadoKey', maxCount: 1 }
+]), asyncHandler(async (req, res) => {
+  if (!req.files || !req.files['certificadoCrt'] || !req.files['certificadoKey'])
+    return res.status(400).json({ error: 'Envie ambos os arquivos .crt e .key' });
+
+  res.json({
+    success: true,
+    message: 'Certificados recebidos!',
+    arquivos: {
+      crt: req.files['certificadoCrt'][0].filename,
+      key: req.files['certificadoKey'][0].filename
+    }
   });
+}));
+
+// 🔹 Agente HTTPS Santander
+function createHttpsAgent() {
+  try {
+    const certBase64 = process.env.SANTANDER_CERTIFICATE_CRT_B64;
+    const keyBase64 = process.env.SANTANDER_PRIVATE_KEY_B64;
+    if (!certBase64 || !keyBase64) return null;
+
+    return new https.Agent({
+      cert: Buffer.from(certBase64, 'base64').toString('utf-8'),
+      key: Buffer.from(keyBase64, 'base64').toString('utf-8'),
+      rejectUnauthorized: true
+    });
+  } catch (error) {
+    console.error('Erro criar agente HTTPS:', error);
+    return null;
+  }
+}
+
+// 🔹 Obter token Santander
+app.post('/api/santander/token', authenticate, asyncHandler(async (req, res) => {
+  const formData = new URLSearchParams();
+  formData.append('client_id', SANTANDER_CONFIG.CLIENT_ID);
+  formData.append('client_secret', SANTANDER_CONFIG.CLIENT_SECRET);
+  formData.append('grant_type', 'client_credentials');
+
+  const config = { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } };
+  const httpsAgent = createHttpsAgent();
+  if (httpsAgent) config.httpsAgent = httpsAgent;
 
   try {
     const response = await axios.post(
       'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
       formData,
-      { httpsAgent: getSantanderAgent(), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+      config
     );
     res.json(response.data);
   } catch (error) {
-    console.error('Erro ao obter token Santander:', error.response?.data || error.message);
+    console.error('Erro token Santander:', error.response?.data || error.message);
     res.status(500).json({ error: 'Falha ao obter token', details: error.response?.data || error.message });
   }
 }));
 
-// 🔹 Obter Workspace
+// 🔹 Obter workspace Santander
 async function obterWorkspaceId(accessToken) {
   try {
     const response = await axios.get(
       'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
-      { headers: { 'Authorization': `Bearer ${accessToken}`, 'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID }, httpsAgent: getSantanderAgent() }
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+          'covenantCode': SANTANDER_CONFIG.COVENANT_CODE,
+          'participantCode': SANTANDER_CONFIG.PARTICIPANT_CODE
+        }
+      }
     );
-    if (response.data?.length) return response.data[0].id;
+    if (response.data && response.data.length > 0) return response.data[0].id;
 
+    // Se não existir workspace, cria
     const createResponse = await axios.post(
       'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
-      { name: 'Workspace Principal', description: 'Workspace para gestão de boletos' },
-      { headers: { 'Authorization': `Bearer ${accessToken}`, 'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID }, httpsAgent: getSantanderAgent() }
+      { name: 'Workspace Principal' },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`,
+          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+          'covenantCode': SANTANDER_CONFIG.COVENANT_CODE,
+          'participantCode': SANTANDER_CONFIG.PARTICIPANT_CODE
+        }
+      }
     );
     return createResponse.data.id;
   } catch (error) {
-    console.error('Erro ao obter workspace:', error.response?.data || error.message);
+    console.error('Erro workspace Santander:', error.response?.data || error.message);
     throw new Error('Não foi possível obter ou criar workspace');
   }
 }
@@ -156,20 +225,25 @@ async function obterWorkspaceId(accessToken) {
 // 🔹 Registrar boleto
 app.post('/api/santander/boletos', authenticate, asyncHandler(async (req, res) => {
   const { dadosBoleto } = req.body;
-  if (!dadosBoleto) return res.status(400).json({ error: 'Dados do boleto obrigatórios' });
+  if (!dadosBoleto) return res.status(400).json({ error: 'Dados do boleto não fornecidos' });
 
   try {
-    const tokenResp = await axios.post(
+    // Token
+    const tokenResponse = await axios.post(
       'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
-      new URLSearchParams({ grant_type: 'client_credentials', client_id: SANTANDER_CONFIG.CLIENT_ID, client_secret: SANTANDER_CONFIG.CLIENT_SECRET }),
-      { httpsAgent: getSantanderAgent(), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+      new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: SANTANDER_CONFIG.CLIENT_ID,
+        client_secret: SANTANDER_CONFIG.CLIENT_SECRET
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, httpsAgent: createHttpsAgent() }
     );
-    const accessToken = tokenResp.data.access_token;
+    const accessToken = tokenResponse.data.access_token;
     const workspaceId = await obterWorkspaceId(accessToken);
 
     const payload = {
       nsuCode: `${dadosBoleto.clientNumber}-${Date.now()}`,
-      bankNumber: Math.floor(Math.random() * 1000000),
+      bankNumber: await gerarBankNumberSequencial(),
       valor: dadosBoleto.valor,
       pagador: {
         nome: dadosBoleto.pagadorNome,
@@ -183,61 +257,104 @@ app.post('/api/santander/boletos', authenticate, asyncHandler(async (req, res) =
       ...dadosBoleto
     };
 
-    const boletoResp = await axios.post(
+    const boletoResponse = await axios.post(
       `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips`,
       payload,
-      { headers: { 'Authorization': `Bearer ${accessToken}`, 'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID, 'Content-Type': 'application/json' }, httpsAgent: getSantanderAgent() }
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+          'Authorization': `Bearer ${accessToken}`
+        },
+        httpsAgent: createHttpsAgent()
+      }
     );
 
     if (db) {
       const boletoRef = await db.collection('boletos').add({ ...payload, workspaceId, status: 'pendente', dataCriacao: new Date() });
-      return res.json({ ...boletoResp.data, id: boletoRef.id });
+      res.json({ ...boletoResponse.data, id: boletoRef.id });
+    } else {
+      res.json(boletoResponse.data);
     }
-
-    res.json(boletoResp.data);
   } catch (error) {
     console.error('Erro ao registrar boleto:', error.response?.data || error.message);
     res.status(500).json({ error: 'Falha ao registrar boleto', details: error.response?.data || error.message });
   }
 }));
 
-// 🔹 PDF do Boleto
+// 🔹 Gerar PDF boleto
 app.post('/api/santander/boletos/pdf', authenticate, asyncHandler(async (req, res) => {
   const { digitableLine, payerDocumentNumber } = req.body;
-  if (!digitableLine || !payerDocumentNumber) return res.status(400).json({ error: 'Linha digitável e documento do pagador obrigatórios' });
+  if (!digitableLine || !payerDocumentNumber) return res.status(400).json({ error: 'Linha digitável e documento obrigatórios' });
 
   try {
-    const tokenResp = await axios.post(
+    const tokenResponse = await axios.post(
       'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
-      new URLSearchParams({ client_id: SANTANDER_CONFIG.CLIENT_ID, client_secret: SANTANDER_CONFIG.CLIENT_SECRET, grant_type: 'client_credentials' }),
-      { httpsAgent: getSantanderAgent(), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+      new URLSearchParams({
+        client_id: SANTANDER_CONFIG.CLIENT_ID,
+        client_secret: SANTANDER_CONFIG.CLIENT_SECRET,
+        grant_type: 'client_credentials'
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
-    const accessToken = tokenResp.data.access_token;
+    const accessToken = tokenResponse.data.access_token;
 
-    const pdfResp = await axios({
+    const pdfResponse = await axios({
       method: 'post',
       url: `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`,
       data: { payerDocumentNumber },
-      headers: { 'Authorization': `Bearer ${accessToken}`, 'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID, 'Content-Type': 'application/json' },
-      responseType: 'arraybuffer',
-      httpsAgent: getSantanderAgent()
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+        'Authorization': `Bearer ${accessToken}`
+      },
+      responseType: 'arraybuffer'
     });
 
-    res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="boleto-${digitableLine}.pdf"`, 'Content-Length': pdfResp.data.length });
-    res.send(Buffer.from(pdfResp.data));
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="boleto-${digitableLine}.pdf"`,
+      'Content-Length': pdfResponse.data.length
+    });
+    res.send(Buffer.from(pdfResponse.data));
   } catch (error) {
-    console.error('Erro ao gerar PDF:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Falha ao gerar PDF', details: error.response?.data || error.message });
+    console.error('Erro gerar PDF:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Falha ao gerar PDF', details: error.message });
   }
 }));
+
+// 🔹 Auxiliares
+async function gerarBankNumberSequencial() {
+  if (!db) return Math.floor(Math.random() * 1000000);
+  try {
+    const counterRef = db.collection('counters').doc('bankNumber');
+    return await db.runTransaction(async (t) => {
+      const doc = await t.get(counterRef);
+      const newSeq = doc.exists ? doc.data().sequence + 1 : 1;
+      t.set(counterRef, { sequence: newSeq }, { merge: true });
+      return newSeq;
+    });
+  } catch {
+    return Math.floor(Math.random() * 1000000);
+  }
+}
 
 // 🔹 Handlers globais
 app.use((req, res) => res.status(404).json({ error: "Rota não encontrada" }));
 app.use((err, req, res, next) => {
   console.error('Erro global:', err.stack);
-  res.status(500).json({ error: 'Algo deu errado no servidor!', details: err.message });
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ error: 'Arquivo muito grande. Limite 5MB.' });
+    if (err.code === 'LIMIT_UNEXPECTED_FILE') return res.status(400).json({ error: 'Campo de arquivo inesperado.' });
+  }
+  res.status(500).json({ error: 'Algo deu errado no servidor!' });
 });
 
-// 🔹 Inicialização do servidor
+// 🔹 Inicialização
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`Servidor rodando na porta ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Servidor rodando na porta ${PORT}`);
+  console.log(`Ambiente: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`Health check: http://0.0.0.0:${PORT}/health`);
+});
+
