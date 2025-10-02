@@ -174,37 +174,90 @@ function gerarIssueDate() {
   return hoje.toISOString().split('T')[0];
 }
 
+// Função para gerar discount limitDate = hoje + 5 dias
+function gerarDiscountLimitDate() {
+  const hoje = new Date();
+  hoje.setDate(hoje.getDate() + 5);
+  return hoje.toISOString().split('T')[0];
+}
+
+// Buscar clientNumber no Firebase
+async function buscarClientNumber(cnpj) {
+  if (!db) return null;
+  try {
+    const lojistaSnapshot = await db.collection('lojistas').doc('nlu').collection('clientes')
+      .where('cnpj', '==', cnpj)
+      .limit(1)
+      .get();
+    if (!lojistaSnapshot.empty) {
+      const doc = lojistaSnapshot.docs[0];
+      return doc.data().clientNumber;
+    }
+    return null;
+  } catch (error) {
+    console.error('Erro ao buscar clientNumber no Firebase:', error);
+    return null;
+  }
+}
+
 // Registrar boleto
 app.post('/api/santander/boletos', async (req, res) => {
   const { dadosBoleto } = req.body;
   if (!dadosBoleto) return res.status(400).json({ error: 'Dados do boleto não fornecidos' });
 
   try {
+    const clientNumber = await buscarClientNumber(dadosBoleto.pagadorDocumento);
+    if (!clientNumber) return res.status(400).json({ error: 'ClientNumber do cliente não encontrado no Firebase' });
+
     const accessToken = await obterTokenSantander();
     const workspaceId = await criarWorkspace(accessToken);
 
     console.log("\n=== [3] Registrando BOLETO ===");
 
     const dueDate = calcularQuintoDiaUtilProximoMes();
+    const discountLimitDate = gerarDiscountLimitDate();
 
     const payload = {
-      nsuCode: `${dadosBoleto.clientNumber}${Date.now()}`, // apenas números
-      nsuDate: gerarNsuDate(),                              // YYYY-MM-DD
-      paymentType: "REGISTRO",
-      issueDate: gerarIssueDate(),                          // hoje + 1 dia
-      dueDate: dueDate,
-      covenantCode: parseInt(SANTANDER_CONFIG.COVENANT_CODE),
       environment: "PRODUCAO",
+      nsuCode: `${clientNumber}${Date.now()}`,
+      nsuDate: gerarNsuDate(),
+      covenantCode: parseInt(SANTANDER_CONFIG.COVENANT_CODE),
+      bankNumber: "0036",
+      clientNumber: clientNumber,
+      dueDate: dueDate,
+      issueDate: gerarIssueDate(),
+      participantCode: "REGISTRO12",
       nominalValue: dadosBoleto.valorCompra,
       documentKind: "DUPLICATA_MERCANTIL",
+      deductionValue: "0.00",
+      paymentType: "REGISTRO",
+      writeOffQuantityDays: "30",
+      messages: [
+        "Pagamento até o 5o dia útil de cada mes",
+        "Protestar após 30 dias de vencimento"
+      ],
       payer: {
         name: dadosBoleto.pagadorNome,
-        document: dadosBoleto.pagadorDocumento,
+        documentType: "CNPJ",
+        documentNumber: dadosBoleto.pagadorDocumento,
         address: dadosBoleto.pagadorEndereco,
+        neighborhood: dadosBoleto.bairro,
         city: dadosBoleto.pagadorCidade,
         state: dadosBoleto.pagadorEstado,
         zipCode: dadosBoleto.pagadorCEP
-      }
+      },
+      key: {
+        type: "CNPJ",
+        dictKey: "09199193000126"
+      },
+      discount: {
+        type: "VALOR_DATA_FIXA",
+        discountOne: {
+          value: "0.50",
+          limitDate: discountLimitDate
+        }
+      },
+      interestPercentage: "05.00"
     };
 
     console.log("➡️ Payload Boleto:", payload);
@@ -264,4 +317,3 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`Ambiente: ${process.env.NODE_ENV || 'development'}`);
   console.log(`Health check: http://0.0.0.0:${PORT}/health`);
 });
-
