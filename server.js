@@ -151,7 +151,6 @@ async function buscarClientNumber(lojistaId) {
   try {
     console.log('🔍 Buscando clientNumber para lojista:', lojistaId);
     
-    // Busca direta pelo documento do lojista
     const lojistaDoc = await db.collection('lojistas').doc(lojistaId).get();
     
     if (lojistaDoc.exists) {
@@ -186,8 +185,6 @@ async function buscarClientNumber(lojistaId) {
 // =============================================
 // FUNÇÕES AUXILIARES SANTANDER
 // =============================================
-
-// Obter token Santander
 async function obterTokenSantander() {
   console.log("\n=== [1] Solicitando TOKEN Santander ===");
   
@@ -212,7 +209,7 @@ async function obterTokenSantander() {
           'Content-Type': 'application/x-www-form-urlencoded',
           'Accept': 'application/json'
         },
-        httpsAgent: httpsAgent,
+        httpsAgent,
         timeout: 30000
       }
     );
@@ -229,20 +226,25 @@ async function obterTokenSantander() {
   }
 }
 
-// Criar Workspace
+// =============================================
+// CRIAR WORKSPACE COM FALLBACK E LOGS DETALHADOS
+// =============================================
 async function criarWorkspace(accessToken) {
   console.log("\n=== [2] Criando WORKSPACE ===");
-  
-    const payload = {
-      type: "BILLING",
-      description: "Workspace de Cobranca Mendes Connexions", // sem acentos
-      covenants: [{ code: SANTANDER_CONFIG.COVENANT_CODE.toString() }]
-    };
-  
+
+  const payload = {
+    type: "BILLING",
+    description: "Workspace Mendes Connexions", // texto simples
+    covenants: [{ code: SANTANDER_CONFIG.COVENANT_CODE.toString() }],
+    workspaceType: "BILLING"
+  };
+
   console.log("➡️ Payload Workspace:", JSON.stringify(payload, null, 2));
 
   try {
     const httpsAgent = createHttpsAgent();
+    if (!httpsAgent) throw new Error('Agente HTTPS não disponível');
+
     const response = await axios.post(
       'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
       payload,
@@ -253,110 +255,112 @@ async function criarWorkspace(accessToken) {
           'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
           'Accept': 'application/json'
         },
-        httpsAgent: httpsAgent,
+        httpsAgent,
         timeout: 30000
       }
     );
-    
+
     console.log("✅ Workspace criada:", response.data.id);
     return response.data.id;
-  } catch (err) {
+
+  } catch (error) {
     console.error("❌ Erro ao criar workspace:", {
-      status: err.response?.status,
-      data: err.response?.data,
-      message: err.message
+      status: error.response?.status,
+      data: error.response?.data,
+      message: error.message
     });
-    throw err;
+
+    if (error.response?.data?._errors) {
+      console.error("💥 Detalhes do Validation Error:", JSON.stringify(error.response.data._errors, null, 2));
+    }
+
+    // Tentativa de fallback com payload mínimo
+    try {
+      console.log("⚡ Tentando criar workspace com payload mínimo...");
+      const fallbackPayload = {
+        type: "BILLING",
+        covenants: [{ code: SANTANDER_CONFIG.COVENANT_CODE.toString() }]
+      };
+
+      const fallbackResponse = await axios.post(
+        'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
+        fallbackPayload,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+            'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+            'Accept': 'application/json'
+          },
+          httpsAgent: createHttpsAgent(),
+          timeout: 30000
+        }
+      );
+
+      console.log("✅ Workspace criada com payload mínimo:", fallbackResponse.data.id);
+      return fallbackResponse.data.id;
+
+    } catch (fallbackError) {
+      console.error("❌ Fallback workspace também falhou:", {
+        status: fallbackError.response?.status,
+        data: fallbackError.response?.data,
+        message: fallbackError.message
+      });
+
+      if (fallbackError.response?.data?._errors) {
+        console.error("💥 Detalhes do Validation Error do fallback:", JSON.stringify(fallbackError.response.data._errors, null, 2));
+      }
+
+      throw fallbackError;
+    }
   }
 }
 
-// Calcular 5º dia útil do próximo mês
+// =============================================
+// FUNÇÕES DE DATA
+// =============================================
 function calcularQuintoDiaUtilProximoMes() {
   const hoje = new Date();
   let ano = hoje.getFullYear();
   let mes = hoje.getMonth() + 1;
-  
-  // Ajustar para próximo mês
-  if (mes === 12) {
-    mes = 1;
-    ano += 1;
-  } else {
-    mes += 1;
-  }
-  
-  const data = new Date(ano, mes - 1, 1); // primeiro dia do próximo mês
+  if (mes === 12) { mes = 1; ano += 1 } else { mes += 1 }
+
+  const data = new Date(ano, mes - 1, 1);
   let diasUteis = 0;
 
   while (diasUteis < 5) {
     const diaSemana = data.getDay();
-    if (diaSemana !== 0 && diaSemana !== 6) { // Não é domingo (0) nem sábado (6)
-      diasUteis++;
-      if (diasUteis === 5) break;
-    }
+    if (diaSemana !== 0 && diaSemana !== 6) diasUteis++;
+    if (diasUteis === 5) break;
     data.setDate(data.getDate() + 1);
   }
 
   return data.toISOString().split('T')[0];
 }
 
-// Função para gerar nsuDate no formato YYYY-MM-DD
-function gerarNsuDate() {
-  return new Date().toISOString().split('T')[0];
-}
-
-// Função para gerar issueDate = hoje + 1 dia
-function gerarIssueDate() {
-  const hoje = new Date();
-  hoje.setDate(hoje.getDate() + 1);
-  return hoje.toISOString().split('T')[0];
-}
-
-// Função para gerar discount limitDate = hoje + 5 dias
-function gerarDiscountLimitDate() {
-  const hoje = new Date();
-  hoje.setDate(hoje.getDate() + 5);
-  return hoje.toISOString().split('T')[0];
-}
+function gerarNsuDate() { return new Date().toISOString().split('T')[0]; }
+function gerarIssueDate() { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().split('T')[0]; }
+function gerarDiscountLimitDate() { const d = new Date(); d.setDate(d.getDate() + 5); return d.toISOString().split('T')[0]; }
 
 // =============================================
-// ROTA PRINCIPAL ATUALIZADA: REGISTRAR BOLETO
+// ROTA PRINCIPAL: REGISTRAR BOLETO
 // =============================================
 app.post('/api/santander/boletos', async (req, res) => {
   console.log("📥 Recebendo requisição para gerar boleto...");
   
   const { dadosBoleto, lojistaId } = req.body;
-  
-  if (!dadosBoleto || !lojistaId) {
-    console.log('❌ Dados incompletos:', {
-      temDadosBoleto: !!dadosBoleto,
-      temLojistaId: !!lojistaId
-    });
-    return res.status(400).json({
-      error: 'Dados do boleto ou ID do lojista não fornecidos',
-      details: 'É necessário enviar dadosBoleto e lojistaId no corpo da requisição'
-    });
-  }
+  if (!dadosBoleto || !lojistaId) return res.status(400).json({ error: 'Dados do boleto ou ID do lojista não fornecidos' });
 
   try {
     console.log("👤 Lojista ID recebido:", lojistaId);
-    
-    // Busca clientNumber baseado no lojistaId (CORRIGIDO)
     const clientNumber = await buscarClientNumber(lojistaId);
-    
-    if (!clientNumber) {
-      return res.status(400).json({
-        error: 'ClientNumber do lojista não encontrado no Firebase',
-        details: 'Verifique se o lojista está cadastrado corretamente com clientNumber ou idNumber'
-      });
-    }
+    if (!clientNumber) return res.status(400).json({ error: 'ClientNumber do lojista não encontrado no Firebase' });
 
     console.log("✅ ClientNumber encontrado, obtendo token...");
     const accessToken = await obterTokenSantander();
     const workspaceId = await criarWorkspace(accessToken);
 
     console.log("\n=== [3] Registrando BOLETO ===");
-    console.log("💰 ClientNumber utilizado:", clientNumber);
-
     const dueDate = calcularQuintoDiaUtilProximoMes();
     const discountLimitDate = gerarDiscountLimitDate();
 
@@ -367,7 +371,7 @@ app.post('/api/santander/boletos', async (req, res) => {
       covenantCode: parseInt(SANTANDER_CONFIG.COVENANT_CODE),
       bankNumber: "0036",
       clientNumber: clientNumber,
-      dueDate: dueDate,
+      dueDate,
       issueDate: gerarIssueDate(),
       participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
       nominalValue: parseFloat(dadosBoleto.valorCompra).toFixed(2),
@@ -375,10 +379,7 @@ app.post('/api/santander/boletos', async (req, res) => {
       deductionValue: "0.00",
       paymentType: "REGISTRO",
       writeOffQuantityDays: "30",
-      messages: [
-        "Pagamento até o 5o dia útil de cada mes",
-        "Protestar após 30 dias de vencimento"
-      ],
+      messages: ["Pagamento até o 5o dia útil de cada mes", "Protestar após 30 dias de vencimento"],
       payer: {
         name: dadosBoleto.pagadorNome,
         documentType: "CNPJ",
@@ -387,7 +388,7 @@ app.post('/api/santander/boletos', async (req, res) => {
         neighborhood: dadosBoleto.bairro,
         city: dadosBoleto.pagadorCidade,
         state: dadosBoleto.pagadorEstado,
-        zipCode: dadosBoleto.pagadorCEP.replace(/\D/g, '') // Remove caracteres não numéricos
+        zipCode: dadosBoleto.pagadorCEP.replace(/\D/g, '')
       },
       key: {
         type: "CNPJ",
@@ -416,19 +417,13 @@ app.post('/api/santander/boletos', async (req, res) => {
           'Authorization': `Bearer ${accessToken}`,
           'Accept': 'application/json'
         },
-        httpsAgent: httpsAgent,
+        httpsAgent,
         timeout: 30000
       }
     );
 
     console.log("✅ Boleto registrado com sucesso!");
-    
-    res.json({
-      success: true,
-      message: 'Boleto registrado com sucesso',
-      boletoId: boletoResponse.data.nsuCode,
-      ...boletoResponse.data
-    });
+    res.json({ success: true, message: 'Boleto registrado com sucesso', boletoId: boletoResponse.data.nsuCode, ...boletoResponse.data });
 
   } catch (error) {
     console.error("❌ Erro no fluxo Santander:", {
@@ -437,37 +432,22 @@ app.post('/api/santander/boletos', async (req, res) => {
       data: error.response?.data,
       stack: error.stack
     });
-    
-    res.status(500).json({
-      error: 'Falha no processo Santander',
-      details: error.response?.data || error.message,
-      step: 'registro_boleto'
-    });
+    res.status(500).json({ error: 'Falha no processo Santander', details: error.response?.data || error.message, step: 'registro_boleto' });
   }
 });
 
 // =============================================
-// NOVA ROTA: BUSCAR DADOS LOJISTA
+// ROTA: BUSCAR DADOS LOJISTA
 // =============================================
 app.get('/api/lojista/:lojistaId', async (req, res) => {
   const { lojistaId } = req.params;
-  
-  if (!db) {
-    return res.status(500).json({ error: 'Firestore não disponível' });
-  }
+  if (!db) return res.status(500).json({ error: 'Firestore não disponível' });
 
   try {
     const lojistaDoc = await db.collection('lojistas').doc(lojistaId).get();
-    
-    if (!lojistaDoc.exists) {
-      return res.status(404).json({ error: 'Lojista não encontrado' });
-    }
+    if (!lojistaDoc.exists) return res.status(404).json({ error: 'Lojista não encontrado' });
 
-    const lojistaData = lojistaDoc.data();
-    res.json({
-      id: lojistaId,
-      ...lojistaData
-    });
+    res.json({ id: lojistaId, ...lojistaDoc.data() });
   } catch (error) {
     console.error('Erro ao buscar lojista:', error);
     res.status(500).json({ error: 'Erro interno do servidor' });
@@ -481,49 +461,20 @@ app.get('/api/santander/test', async (req, res) => {
   try {
     console.log('🧪 Testando conexão com Santander...');
     const token = await obterTokenSantander();
-    
-    res.json({
-      success: true,
-      message: 'Conexão com Santander OK',
-      tokenReceived: !!token
-    });
+    res.json({ success: true, message: 'Conexão com Santander OK', tokenReceived: !!token });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Erro na conexão com Santander',
-      error: error.message
-    });
+    res.status(500).json({ success: false, message: 'Falha ao conectar com Santander', error: error.message });
   }
-});
-
-// =============================================
-// HANDLERS GLOBAIS DE ERRO
-// =============================================
-app.use((req, res) => {
-  res.status(404).json({
-    error: "Rota não encontrada",
-    path: req.path,
-    method: req.method
-  });
-});
-
-app.use((err, req, res, next) => {
-  console.error('💥 Erro global não tratado:', err.stack);
-  res.status(500).json({
-    error: 'Algo deu errado no servidor!',
-    message: err.message
-  });
 });
 
 // =============================================
 // INICIALIZAÇÃO DO SERVIDOR
 // =============================================
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`
-🚀 Servidor rodando na porta ${PORT}
-📍 Ambiente: ${process.env.NODE_ENV || 'development'}
-📊 Health check: http://localhost:${PORT}/health
-🔧 Firebase: ${admin.apps.length > 0 ? '✅ Inicializado' : '❌ Não inicializado'}
-  `);
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log('Servidor rodando na porta', PORT);
+  console.log('Ambiente:', process.env.NODE_ENV || 'development');
+  console.log('Health check: http://0.0.0.0:' + PORT + '/health');
+  console.log('====================================================');
 });
+
