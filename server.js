@@ -277,9 +277,10 @@ app.post('/api/santander/boletos', async (req, res) => {
 
     const lojistaData = lojistaDoc.data();
 
-    // Gera um clientNumber único baseado no timestamp + ID do lojista
-    const clientNumber = `${lojistaId.slice(-4)}${Date.now().toString().slice(-6)}`;
-    console.log('🔢 ClientNumber único gerado:', clientNumber);
+    // Gera um clientNumber único de 5 dígitos (somente números)
+    const clientNumber = Math.floor(10000 + Math.random() * 90000).toString();
+    // Garante número de 5 dígitos entre 10000 e 99999
+    console.log('🔢 ClientNumber único gerado (5 dígitos):', clientNumber);
 
     const accessToken = await obterTokenSantander();
     const workspaceId = await criarWorkspace(accessToken);
@@ -293,11 +294,11 @@ app.post('/api/santander/boletos', async (req, res) => {
 
     const payload = {
       environment: "PRODUCAO",
-      nsuCode: `${clientNumber}${Date.now()}`,
+      nsuCode: `${clientNumber}${Date.now()}`, // NSU ainda único
       nsuDate: nsuDate,
       covenantCode: SANTANDER_CONFIG.COVENANT_CODE,
       bankNumber: "0036",
-      clientNumber: clientNumber, // <-- agora único por boleto
+      clientNumber: clientNumber, // <-- agora 5 dígitos
       dueDate: dueDate,
       issueDate: issueDate,
       participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
