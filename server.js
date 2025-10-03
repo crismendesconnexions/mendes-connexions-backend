@@ -376,9 +376,6 @@ app.post('/api/santander/boletos', async (req, res) => {
 // =============================================
 // ROTA: BAIXAR PDF DO BOLETO
 // =============================================
-// =============================================
-// ROTA: BAIXAR PDF DO BOLETO (LINK)
-// =============================================
 app.post('/api/santander/boletos/pdf', async (req, res) => {
   console.log("📥 Recebendo requisição para baixar PDF do boleto...");
 
@@ -391,8 +388,9 @@ app.post('/api/santander/boletos/pdf', async (req, res) => {
     const accessToken = await obterTokenSantander();
     const httpsAgent = createHttpsAgent();
 
-    // URL do Santander
+    // Monta a URL substituindo {digitableLine}
     const url = `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`;
+      
     const payload = { payerDocumentNumber };
 
     console.log("➡️ Payload PDF:", JSON.stringify(payload, null, 2));
@@ -409,13 +407,23 @@ app.post('/api/santander/boletos/pdf', async (req, res) => {
       timeout: 30000
     });
 
-    console.log("✅ PDF gerado com sucesso!");
-    console.log("🔗 Link do PDF:", response.data?.link);
+    // Extrai o link da resposta
+    const link = response.data?.link || response.data?.url;
+
+    if (!link) {
+      console.error("⚠️ Nenhum link retornado pelo Santander:", response.data);
+      return res.status(500).json({
+        error: "Resposta do Santander não contém link do PDF",
+        rawResponse: response.data
+      });
+    }
+
+    console.log("✅ PDF gerado com sucesso! Link:", link);
 
     res.json({
       success: true,
       message: "PDF gerado com sucesso",
-      link: response.data?.link // só devolve o link
+      link
     });
 
   } catch (error) {
