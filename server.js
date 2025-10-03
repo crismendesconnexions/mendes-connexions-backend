@@ -194,20 +194,16 @@ async function obterTokenSantander() {
 }
 
 // =============================================
-// FUNÇÃO: CRIAR WORKSPACE (CORRIGIDO)
+// FUNÇÃO: CRIAR WORKSPACE (payload exato Santander)
 // =============================================
 async function criarWorkspace(accessToken) {
   console.log("\n=== [2] Criando WORKSPACE ===");
 
   const payload = {
-    type: "COLLECTION",                   // ✅ Ajustado para tipo aceito
-    description: "Workspace Mendes Connexions",
-    workspaceType: "COLLECTION",          // ✅ Ajustado
+    type: "BILLING",
+    description: "Workspace de Cobrança",
     covenants: [
-      {
-        code: SANTANDER_CONFIG.COVENANT_CODE.toString(),
-        participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE
-      }
+      { code: parseInt(SANTANDER_CONFIG.COVENANT_CODE) }  // Mantém como número
     ]
   };
 
@@ -220,7 +216,16 @@ async function criarWorkspace(accessToken) {
     const response = await axios.post(
       'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
       payload,
-      { headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}`, 'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID, 'Accept': 'application/json' }, httpsAgent, timeout: 30000 }
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`,
+          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+          'Accept': 'application/json'
+        },
+        httpsAgent,
+        timeout: 30000
+      }
     );
 
     console.log("✅ Workspace criada:", response.data.id);
@@ -230,6 +235,7 @@ async function criarWorkspace(accessToken) {
     throw error;
   }
 }
+
 
 // =============================================
 // FUNÇÕES AUXILIARES DE DATA
