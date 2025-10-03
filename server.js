@@ -105,7 +105,7 @@ if (serviceAccount) {
 const SANTANDER_CONFIG = {
   CLIENT_ID: process.env.SANTANDER_CLIENT_ID,
   CLIENT_SECRET: process.env.SANTANDER_CLIENT_SECRET,
-  COVENANT_CODE: process.env.SANTANDER_COVENANT_CODE || "178622",
+  COVENANT_CODE: parseInt(process.env.SANTANDER_COVENANT_CODE || "178622"),
   PARTICIPANT_CODE: process.env.SANTANDER_PARTICIPANT_CODE || "REGISTRO12",
   DICT_KEY: process.env.SANTANDER_DICT_KEY || "09199193000126"
 };
@@ -203,7 +203,7 @@ async function criarWorkspace(accessToken) {
     type: "BILLING",
     description: "Workspace de Cobrança",
     covenants: [
-      { code: parseInt(SANTANDER_CONFIG.COVENANT_CODE) }  // Mantém como número
+      { code: SANTANDER_CONFIG.COVENANT_CODE }
     ]
   };
 
@@ -236,7 +236,6 @@ async function criarWorkspace(accessToken) {
   }
 }
 
-
 // =============================================
 // FUNÇÕES AUXILIARES DE DATA
 // =============================================
@@ -259,10 +258,7 @@ function calcularQuintoDiaUtilProximoMes() {
 function gerarNsuDate() { return new Date().toISOString().split('T')[0]; }
 function gerarIssueDate() { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().split('T')[0]; }
 function gerarDiscountLimitDate() { const d = new Date(); d.setDate(d.getDate() + 5); return d.toISOString().split('T')[0]; }
-
-function formatarValorParaSantander(valor) {
-  return parseFloat(valor).toFixed(2);
-}
+function formatarValorParaSantander(valor) { return parseFloat(valor).toFixed(2); }
 
 // =============================================
 // ROTA: REGISTRAR BOLETO
@@ -288,39 +284,40 @@ app.post('/api/santander/boletos', async (req, res) => {
       environment: "PRODUCAO",
       nsuCode: `${clientNumber}${Date.now()}`,
       nsuDate: gerarNsuDate(),
-      covenantCode: SANTANDER_CONFIG.COVENANT_CODE.toString(),
+      covenantCode: SANTANDER_CONFIG.COVENANT_CODE,
       bankNumber: "0036",
-      clientNumber: clientNumber,
+      clientNumber: clientNumber.toString().padStart(5,"0"),
       dueDate,
       issueDate: gerarIssueDate(),
       participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
       nominalValue: formatarValorParaSantander(dadosBoleto.valorCompra),
+      payer: {
+        name: dadosBoleto.pagadorNome.toUpperCase(),
+        documentType: "CNPJ",
+        documentNumber: dadosBoleto.pagadorDocumento,
+        address: dadosBoleto.pagadorEndereco.toUpperCase(),
+        neighborhood: dadosBoleto.bairro.toUpperCase(),
+        city: dadosBoleto.pagadorCidade.toUpperCase(),
+        state: dadosBoleto.pagadorEstado.toUpperCase(),
+        zipCode: dadosBoleto.pagadorCEP.replace(/(\d{5})(\d{3})/, "$1-$2")
+      },
       documentKind: "DUPLICATA_MERCANTIL",
       deductionValue: "0.00",
       paymentType: "REGISTRO",
       writeOffQuantityDays: "30",
-      messages: ["Pagamento até o 5o dia útil de cada mes", "Protestar após 30 dias de vencimento"],
-      payer: {
-        name: dadosBoleto.pagadorNome,
-        documentType: "CNPJ",
-        documentNumber: dadosBoleto.pagadorDocumento,
-        address: dadosBoleto.pagadorEndereco,
-        neighborhood: dadosBoleto.bairro,
-        city: dadosBoleto.pagadorCidade,
-        state: dadosBoleto.pagadorEstado,
-        zipCode: dadosBoleto.pagadorCEP.replace(/\D/g, '')
-      },
+      messages: ["mensagem um", "mensagem dois"],
       key: {
         type: "CNPJ",
         dictKey: SANTANDER_CONFIG.DICT_KEY
       },
       discount: {
         type: "VALOR_DATA_FIXA",
-        discounts: [
-          { value: formatarValorParaSantander(0.50), limitDate: discountLimitDate }
-        ]
+        discountOne: {
+          value: "0.50",
+          limitDate: discountLimitDate
+        }
       },
-      interestPercentage: formatarValorParaSantander(5)
+      interestPercentage: "05.00"
     };
 
     console.log("📦 Payload Boleto:", JSON.stringify(payload, null, 2));
