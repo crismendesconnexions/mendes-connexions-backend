@@ -339,6 +339,54 @@ app.post('/api/santander/boletos', async (req, res) => {
 });
 
 // =============================================
+// ROTA: BUSCAR LINK DO PDF DO BOLETO
+// =============================================
+app.get('/api/santander/boletos/:digitableLine/pdf', async (req, res) => {
+  const { digitableLine } = req.params;
+
+  if (!digitableLine) {
+    return res.status(400).json({ error: "digitableLine não fornecido" });
+  }
+
+  try {
+    const accessToken = await obterTokenSantander();
+    const httpsAgent = createHttpsAgent();
+    if (!httpsAgent) throw new Error("Agente HTTPS não disponível");
+
+    console.log(`\n=== [4] Buscando link do PDF para linha digitável: ${digitableLine} ===`);
+
+    const response = await axios.get(
+      `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`,
+      {
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "X-Application-Key": SANTANDER_CONFIG.CLIENT_ID,
+          "Accept": "application/json"
+        },
+        httpsAgent,
+        timeout: 30000
+      }
+    );
+
+    if (response.data?.link) {
+      console.log("📄 Link do PDF do boleto:", response.data.link);
+      return res.json({ success: true, pdfUrl: response.data.link });
+    } else {
+      console.error("❌ Link do PDF não encontrado na resposta:", response.data);
+      return res.status(404).json({ error: "Link do PDF não encontrado", raw: response.data });
+    }
+
+  } catch (error) {
+    console.error("❌ Erro ao buscar PDF do boleto:", {
+      status: error.response?.status,
+      data: error.response?.data,
+      message: error.message
+    });
+    return res.status(500).json({ error: "Erro ao buscar PDF do boleto", details: error.response?.data || error.message });
+  }
+});
+
+// =============================================
 // INICIALIZAÇÃO DO SERVIDOR
 // =============================================
 const PORT = process.env.PORT || 10000;
