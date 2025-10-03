@@ -19,7 +19,7 @@ app.use(helmet({
 app.disable('x-powered-by');
 
 // =============================================
-// CONFIGURAÇÃO CORS ATUALIZADA
+// CONFIGURAÇÃO CORS
 // =============================================
 const corsOptions = {
   origin: [
@@ -42,12 +42,9 @@ app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Middleware de log para debug
+// Middleware de log
 app.use((req, res, next) => {
-  console.log(`📥 ${req.method} ${req.path}`, {
-    body: req.body,
-    headers: req.headers
-  });
+  console.log(`📥 ${req.method} ${req.path}`, { body: req.body, headers: req.headers });
   next();
 });
 
@@ -143,18 +140,13 @@ function createHttpsAgent() {
 // =============================================
 async function buscarClientNumber(lojistaId) {
   if (!db) { console.error('❌ Firestore não inicializado'); return null; }
-  
   try {
     console.log('🔍 Buscando clientNumber para lojista:', lojistaId);
     const lojistaDoc = await db.collection('lojistas').doc(lojistaId).get();
-    
     if (!lojistaDoc.exists) { console.log('❌ Lojista não encontrado'); return null; }
-    
     const data = lojistaDoc.data();
     const clientNumber = data.clientNumber || data.idNumber;
-    
-    console.log('📋 Dados do lojista encontrado:', { exists: lojistaDoc.exists, clientNumber, nome: data.nomeFantasia || data.nome, cnpj: data.cnpj });
-    
+    console.log('📋 Dados do lojista encontrado:', { clientNumber, nome: data.nomeFantasia || data.nome, cnpj: data.cnpj });
     return clientNumber?.toString() || null;
   } catch (error) {
     console.error('💥 Erro ao buscar clientNumber no Firebase:', error);
@@ -194,49 +186,6 @@ async function obterTokenSantander() {
 }
 
 // =============================================
-// FUNÇÃO: CRIAR WORKSPACE (payload exato Santander)
-// =============================================
-async function criarWorkspace(accessToken) {
-  console.log("\n=== [2] Criando WORKSPACE ===");
-
-  const payload = {
-    type: "BILLING",
-    description: "Workspace de Cobrança",
-    covenants: [
-      { code: SANTANDER_CONFIG.COVENANT_CODE }
-    ]
-  };
-
-  console.log("➡️ Payload Workspace:", JSON.stringify(payload, null, 2));
-
-  try {
-    const httpsAgent = createHttpsAgent();
-    if (!httpsAgent) throw new Error('Agente HTTPS não disponível');
-
-    const response = await axios.post(
-      'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
-      payload,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`,
-          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
-          'Accept': 'application/json'
-        },
-        httpsAgent,
-        timeout: 30000
-      }
-    );
-
-    console.log("✅ Workspace criada:", response.data.id);
-    return response.data.id;
-  } catch (error) {
-    console.error("❌ Erro ao criar workspace:", { status: error.response?.status, data: error.response?.data, message: error.message });
-    throw error;
-  }
-}
-
-// =============================================
 // FUNÇÕES AUXILIARES DE DATA
 // =============================================
 function calcularQuintoDiaUtilProximoMes() {
@@ -254,35 +203,34 @@ function calcularQuintoDiaUtilProximoMes() {
   }
   return data.toISOString().split('T')[0];
 }
-
 function gerarNsuDate() { return new Date().toISOString().split('T')[0]; }
 function gerarIssueDate() { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().split('T')[0]; }
 function gerarDiscountLimitDate() { const d = new Date(); d.setDate(d.getDate() + 5); return d.toISOString().split('T')[0]; }
 function formatarValorParaSantander(valor) { return parseFloat(valor).toFixed(2); }
 
 // =============================================
-// ROTA: REGISTRAR BOLETO
+// ROTA: REGISTRAR BOLETO E RETORNAR PDF
 // =============================================
 app.post('/api/santander/boletos', async (req, res) => {
   console.log("📥 Recebendo requisição para gerar boleto...");
   
   const { dadosBoleto, lojistaId } = req.body;
-  if (!dadosBoleto || !lojistaId) return res.status(400).json({ error: 'Dados do boleto ou ID do lojista não fornecidos' });
+  if (!dadosBoleto || !lojistaId)
+    return res.status(400).json({ error: 'Dados do boleto ou ID do lojista não fornecidos' });
 
   try {
     const clientNumber = await buscarClientNumber(lojistaId);
     if (!clientNumber) return res.status(400).json({ error: 'ClientNumber do lojista não encontrado no Firebase' });
 
     const accessToken = await obterTokenSantander();
-    const workspaceId = await criarWorkspace(accessToken);
 
-    console.log("\n=== [3] Registrando BOLETO ===");
     const dueDate = calcularQuintoDiaUtilProximoMes();
     const discountLimitDate = gerarDiscountLimitDate();
+    const nsuCode = `${clientNumber}${Date.now()}`;
 
     const payload = {
       environment: "PRODUCAO",
-      nsuCode: `${clientNumber}${Date.now()}`,
+      nsuCode,
       nsuDate: gerarNsuDate(),
       covenantCode: SANTANDER_CONFIG.COVENANT_CODE,
       bankNumber: "0036",
@@ -305,84 +253,67 @@ app.post('/api/santander/boletos', async (req, res) => {
       deductionValue: "0.00",
       paymentType: "REGISTRO",
       writeOffQuantityDays: "30",
-      messages: ["mensagem um", "mensagem dois"],
-      key: {
-        type: "CNPJ",
-        dictKey: SANTANDER_CONFIG.DICT_KEY
-      },
-      discount: {
-        type: "VALOR_DATA_FIXA",
-        discountOne: {
-          value: "0.50",
-          limitDate: discountLimitDate
-        }
-      },
+      messages: ["mensagem um","mensagem dois"],
+      key: { type: "CNPJ", dictKey: SANTANDER_CONFIG.DICT_KEY },
+      discount: { type: "VALOR_DATA_FIXA", discountOne: { value: "0.50", limitDate: discountLimitDate } },
       interestPercentage: "05.00"
     };
 
     console.log("📦 Payload Boleto:", JSON.stringify(payload, null, 2));
 
     const httpsAgent = createHttpsAgent();
+    if (!httpsAgent) throw new Error('Agente HTTPS não disponível');
+
+    // Registrar boleto
     const boletoResponse = await axios.post(
-      `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips`,
+      `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills`,
       payload,
-      { headers: { 'Content-Type': 'application/json', 'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID, 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }, httpsAgent, timeout: 30000 }
-    );
-
-    console.log("✅ Boleto registrado com sucesso!");
-    res.json({ success: true, message: 'Boleto registrado com sucesso', boletoId: boletoResponse.data.nsuCode, ...boletoResponse.data });
-
-  } catch (error) {
-    console.error("❌ Erro no fluxo Santander:", { message: error.message, status: error.response?.status, data: error.response?.data, stack: error.stack });
-    res.status(500).json({ error: 'Falha no processo Santander', details: error.response?.data || error.message, step: 'registro_boleto' });
-  }
-});
-
-// =============================================
-// ROTA: BUSCAR LINK DO PDF DO BOLETO
-// =============================================
-app.get('/api/santander/boletos/:digitableLine/pdf', async (req, res) => {
-  const { digitableLine } = req.params;
-
-  if (!digitableLine) {
-    return res.status(400).json({ error: "digitableLine não fornecido" });
-  }
-
-  try {
-    const accessToken = await obterTokenSantander();
-    const httpsAgent = createHttpsAgent();
-    if (!httpsAgent) throw new Error("Agente HTTPS não disponível");
-
-    console.log(`\n=== [4] Buscando link do PDF para linha digitável: ${digitableLine} ===`);
-
-    const response = await axios.get(
-      `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`,
       {
         headers: {
-          "Authorization": `Bearer ${accessToken}`,
-          "X-Application-Key": SANTANDER_CONFIG.CLIENT_ID,
-          "Accept": "application/json"
+          'Content-Type': 'application/json',
+          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+          'Authorization': `Bearer ${accessToken}`,
+          'Accept': 'application/json'
         },
         httpsAgent,
         timeout: 30000
       }
     );
 
-    if (response.data?.link) {
-      console.log("📄 Link do PDF do boleto:", response.data.link);
-      return res.json({ success: true, pdfUrl: response.data.link });
-    } else {
-      console.error("❌ Link do PDF não encontrado na resposta:", response.data);
-      return res.status(404).json({ error: "Link do PDF não encontrado", raw: response.data });
-    }
+    console.log("✅ Boleto registrado com sucesso!");
+
+    // Buscar PDF
+    const digitableLine = boletoResponse.data.nsuCode;
+    const pdfResponse = await axios.post(
+      `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`,
+      {},
+      {
+        headers: {
+          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+          'Authorization': `Bearer ${accessToken}`,
+          'Accept': 'application/json'
+        },
+        httpsAgent,
+        timeout: 30000
+      }
+    );
+
+    const pdfUrl = pdfResponse.data?.link;
+    if (pdfUrl) console.log("📄 Link do PDF do boleto:", pdfUrl);
+    else console.error("❌ Link do PDF não retornado:", pdfResponse.data);
+
+    // Retornar PDF para download
+    const pdfBuffer = (await axios.get(pdfUrl, { responseType: 'arraybuffer', httpsAgent })).data;
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename=boleto-${digitableLine}.pdf`,
+      'Content-Length': pdfBuffer.length
+    });
+    res.send(pdfBuffer);
 
   } catch (error) {
-    console.error("❌ Erro ao buscar PDF do boleto:", {
-      status: error.response?.status,
-      data: error.response?.data,
-      message: error.message
-    });
-    return res.status(500).json({ error: "Erro ao buscar PDF do boleto", details: error.response?.data || error.message });
+    console.error("❌ Erro no fluxo Santander:", { message: error.message, status: error.response?.status, data: error.response?.data });
+    res.status(500).json({ error: 'Falha no processo Santander', details: error.response?.data || error.message });
   }
 });
 
