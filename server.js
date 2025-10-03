@@ -266,11 +266,20 @@ app.post('/api/santander/boletos', async (req, res) => {
   console.log("📥 Recebendo requisição para gerar boleto...");
 
   const { dadosBoleto, lojistaId } = req.body;
-  if (!dadosBoleto || !lojistaId) return res.status(400).json({ error: 'Dados do boleto ou ID do lojista não fornecidos' });
+  if (!dadosBoleto || !lojistaId)
+    return res.status(400).json({ error: 'Dados do boleto ou ID do lojista não fornecidos' });
 
   try {
-    const clientNumber = await buscarClientNumber(lojistaId);
-    if (!clientNumber) return res.status(400).json({ error: 'ClientNumber do lojista não encontrado no Firebase' });
+    // Busca os dados do lojista no Firebase
+    const lojistaDoc = await db.collection('lojistas').doc(lojistaId).get();
+    if (!lojistaDoc.exists)
+      return res.status(400).json({ error: 'Lojista não encontrado no Firebase' });
+
+    const lojistaData = lojistaDoc.data();
+
+    // Gera um clientNumber único baseado no timestamp + ID do lojista
+    const clientNumber = `${lojistaId.slice(-4)}${Date.now().toString().slice(-6)}`;
+    console.log('🔢 ClientNumber único gerado:', clientNumber);
 
     const accessToken = await obterTokenSantander();
     const workspaceId = await criarWorkspace(accessToken);
@@ -288,7 +297,7 @@ app.post('/api/santander/boletos', async (req, res) => {
       nsuDate: nsuDate,
       covenantCode: SANTANDER_CONFIG.COVENANT_CODE,
       bankNumber: "0036",
-      clientNumber: clientNumber.toString().padStart(5, "0"),
+      clientNumber: clientNumber, // <-- agora único por boleto
       dueDate: dueDate,
       issueDate: issueDate,
       participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
@@ -341,7 +350,12 @@ app.post('/api/santander/boletos', async (req, res) => {
     );
 
     console.log("✅ Boleto registrado com sucesso!");
-    res.json({ success: true, message: 'Boleto registrado com sucesso', boletoId: boletoResponse.data.nsuCode, ...boletoResponse.data });
+    res.json({
+      success: true,
+      message: 'Boleto registrado com sucesso',
+      boletoId: boletoResponse.data.nsuCode,
+      ...boletoResponse.data
+    });
 
   } catch (error) {
     console.error("❌ Erro no fluxo Santander:", {
