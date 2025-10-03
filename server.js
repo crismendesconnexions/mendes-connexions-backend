@@ -348,5 +348,3 @@ app.listen(PORT, () => {
   console.log('Health check: http://0.0.0.0:' + PORT + '/health');
   console.log('====================================================');
 });
-
-atualize meu codigo, e quero ver o link do download do pdf no meu log
