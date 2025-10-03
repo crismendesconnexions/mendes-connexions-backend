@@ -404,11 +404,23 @@ app.post('/api/santander/boletos/pdf', async (req, res) => {
       timeout: 30000
     });
 
-    console.log("✅ PDF gerado com sucesso!");
+    // Extrai o link da resposta
+    const link = response.data?.link || response.data?.url;
+
+    if (!link) {
+      console.error("⚠️ Nenhum link retornado pelo Santander:", response.data);
+      return res.status(500).json({
+        error: "Resposta do Santander não contém link do PDF",
+        rawResponse: response.data
+      });
+    }
+
+    console.log("✅ PDF gerado com sucesso! Link:", link);
+
     res.json({
       success: true,
       message: "PDF gerado com sucesso",
-      data: response.data
+      link
     });
 
   } catch (error) {
@@ -424,6 +436,7 @@ app.post('/api/santander/boletos/pdf', async (req, res) => {
     });
   }
 });
+
 
 // =============================================
 // INICIALIZAÇÃO DO SERVIDOR
