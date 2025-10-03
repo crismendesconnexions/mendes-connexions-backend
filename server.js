@@ -313,45 +313,48 @@ app.post('/api/santander/boletos', async (req, res) => {
     const dueDate = calcularQuintoDiaUtilProximoMes();
     const discountLimitDate = gerarDiscountLimitDate();
 
-    const payload = {
-      environment: "PRODUCAO",
-      nsuCode: gerarNSU(clientNumber),
-      nsuDate: gerarNsuDate(),
-      covenantCode: SANTANDER_CONFIG.COVENANT_CODE,
-      bankNumber,
-      clientNumber: String(clientNumber).padStart(5, "0"),
-      dueDate,
-      issueDate: gerarIssueDate(),
-      participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
-      nominalValue: formatarValorParaSantander(dadosBoleto.valorCompra),
-      payer: {
-        name: dadosBoleto.pagadorNome.toUpperCase(),
-        documentType: "CNPJ",
-        documentNumber: dadosBoleto.pagadorDocumento,
-        address: dadosBoleto.pagadorEndereco.toUpperCase(),
-        neighborhood: dadosBoleto.bairro.toUpperCase(),
-        city: dadosBoleto.pagadorCidade.toUpperCase(),
-        state: dadosBoleto.pagadorEstado.toUpperCase(),
-        zipCode: dadosBoleto.pagadorCEP.replace(/(\d{5})(\d{3})/, "$1-$2")
-      },
-      documentKind: "DUPLICATA_MERCANTIL",
-      deductionValue: "0.00",
-      paymentType: "REGISTRO",
-      writeOffQuantityDays: "30",
-      messages: ["mensagem um", "mensagem dois"],
-      key: {
-        type: "CNPJ",
-        dictKey: SANTANDER_CONFIG.DICT_KEY
-      },
-      discount: {
-        type: "VALOR_DATA_FIXA",
-        discountOne: {
-          value: "0.50",
-          limitDate: discountLimitDate
-        }
-      },
-      interestPercentage: "05.00"
-    };
+      const valorBoleto = (parseFloat(dadosBoleto.valorCompra) * 0.02).toFixed(2);
+
+      const payload = {
+        environment: "PRODUCAO",
+        nsuCode: gerarNSU(clientNumber),
+        nsuDate: gerarNsuDate(),
+        covenantCode: SANTANDER_CONFIG.COVENANT_CODE,
+        bankNumber,
+        clientNumber: String(clientNumber).padStart(5, "0"),
+        dueDate,
+        issueDate: gerarIssueDate(),
+        participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
+        nominalValue: valorBoleto, // <-- 2% do valor da compra
+        payer: {
+          name: dadosBoleto.pagadorNome.toUpperCase(),
+          documentType: "CNPJ",
+          documentNumber: dadosBoleto.pagadorDocumento,
+          address: dadosBoleto.pagadorEndereco.toUpperCase(),
+          neighborhood: dadosBoleto.bairro.toUpperCase(),
+          city: dadosBoleto.pagadorCidade.toUpperCase(),
+          state: dadosBoleto.pagadorEstado.toUpperCase(),
+          zipCode: dadosBoleto.pagadorCEP.replace(/(\d{5})(\d{3})/, "$1-$2")
+        },
+        documentKind: "DUPLICATA_MERCANTIL",
+        deductionValue: "0.00",
+        paymentType: "REGISTRO",
+        writeOffQuantityDays: "30",
+        messages: ["mensagem um", "mensagem dois"],
+        key: {
+          type: "CNPJ",
+          dictKey: SANTANDER_CONFIG.DICT_KEY
+        },
+        discount: {
+          type: "VALOR_DATA_FIXA",
+          discountOne: {
+            value: "0.50",
+            limitDate: discountLimitDate
+          }
+        },
+        interestPercentage: "05.00"
+      };
+
 
     console.log("📦 Payload Boleto:", JSON.stringify(payload, null, 2));
 
