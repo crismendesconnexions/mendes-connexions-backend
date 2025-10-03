@@ -370,6 +370,60 @@ app.post('/api/santander/boletos', async (req, res) => {
     res.status(500).json({ error: 'Falha no processo Santander', details: error.response?.data || error.message, step: 'registro_boleto' });
   }
 });
+// =============================================
+// ROTA: BAIXAR PDF DO BOLETO
+// =============================================
+app.post('/api/santander/boletos/pdf', async (req, res) => {
+  console.log("📥 Recebendo requisição para baixar PDF do boleto...");
+
+  const { digitableLine, payerDocumentNumber } = req.body;
+  if (!digitableLine || !payerDocumentNumber) {
+    return res.status(400).json({ error: "É necessário informar 'digitableLine' e 'payerDocumentNumber'" });
+  }
+
+  try {
+    const accessToken = await obterTokenSantander();
+    const httpsAgent = createHttpsAgent();
+
+    // Monta a URL substituindo {digitableLine}
+    const url = `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`;
+
+    const payload = { payerDocumentNumber };
+
+    console.log("➡️ Payload PDF:", JSON.stringify(payload, null, 2));
+    console.log("➡️ URL:", url);
+
+    const response = await axios.post(url, payload, {
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${accessToken}`,
+        "X-Application-Key": SANTANDER_CONFIG.CLIENT_ID,
+        "Accept": "application/json"
+      },
+      httpsAgent,
+      timeout: 30000
+    });
+
+    console.log("✅ PDF gerado com sucesso!");
+    res.json({
+      success: true,
+      message: "PDF gerado com sucesso",
+      data: response.data
+    });
+
+  } catch (error) {
+    console.error("❌ Erro ao gerar PDF do boleto:", {
+      message: error.message,
+      status: error.response?.status,
+      data: error.response?.data
+    });
+    res.status(500).json({
+      error: "Falha ao gerar PDF do boleto",
+      details: error.response?.data || error.message,
+      step: "gerar_pdf"
+    });
+  }
+});
 
 // =============================================
 // INICIALIZAÇÃO DO SERVIDOR
