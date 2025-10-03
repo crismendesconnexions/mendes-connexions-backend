@@ -233,11 +233,11 @@ async function obterTokenSantander() {
 async function criarWorkspace(accessToken) {
   console.log("\n=== [2] Criando WORKSPACE ===");
   
-  const payload = {
-    type: "BILLING",
-    description: "Workspace de Cobrança Mendes Connexions",
-    covenants: [{ code: parseInt(SANTANDER_CONFIG.COVENANT_CODE) }]
-  };
+    const payload = {
+      type: "BILLING",
+      description: "Workspace de Cobranca Mendes Connexions", // sem acentos
+      covenants: [{ code: SANTANDER_CONFIG.COVENANT_CODE.toString() }]
+    };
   
   console.log("➡️ Payload Workspace:", JSON.stringify(payload, null, 2));
 
