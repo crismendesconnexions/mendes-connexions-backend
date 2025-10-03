@@ -194,7 +194,7 @@ async function obterTokenSantander() {
 }
 
 // =============================================
-// FUNÇÃO: CRIAR WORKSPACE (payload exato Santander)
+// FUNÇÃO: CRIAR WORKSPACE
 // =============================================
 async function criarWorkspace(accessToken) {
   console.log("\n=== [2] Criando WORKSPACE ===");
@@ -261,6 +261,38 @@ function gerarDiscountLimitDate() { const d = new Date(); d.setDate(d.getDate() 
 function formatarValorParaSantander(valor) { return parseFloat(valor).toFixed(2); }
 
 // =============================================
+// FUNÇÃO: GERAR NSU (YYMMDDHHMMSS + clientNumber 5 dígitos)
+// =============================================
+function gerarNSU(clientNumber) {
+  const now = new Date();
+  const YY = String(now.getFullYear()).slice(-2);
+  const MM = String(now.getMonth() + 1).padStart(2, '0');
+  const DD = String(now.getDate()).padStart(2, '0');
+  const HH = String(now.getHours()).padStart(2, '0');
+  const min = String(now.getMinutes()).padStart(2, '0');
+  const SS = String(now.getSeconds()).padStart(2, '0');
+
+  const clientStr = String(clientNumber).padStart(5, '0'); // 5 dígitos
+  return `${YY}${MM}${DD}${HH}${min}${SS}${clientStr}`;
+}
+
+// =============================================
+// FUNÇÃO: GERAR bankNumber SEQUENCIAL
+// =============================================
+async function gerarBankNumber() {
+  if (!db) { console.error('❌ Firestore não inicializado'); return "0040"; }
+
+  const ref = db.collection('config').doc('ultimoBankNumber');
+  const doc = await ref.get();
+  let ultimo = 39; // começa antes de 40 para incrementar
+  if (doc.exists && doc.data()?.value) ultimo = parseInt(doc.data().value);
+
+  const novoBankNumber = ultimo + 1;
+  await ref.set({ value: novoBankNumber });
+  return String(novoBankNumber).padStart(4, '0');
+}
+
+// =============================================
 // ROTA: REGISTRAR BOLETO
 // =============================================
 app.post('/api/santander/boletos', async (req, res) => {
@@ -275,6 +307,7 @@ app.post('/api/santander/boletos', async (req, res) => {
 
     const accessToken = await obterTokenSantander();
     const workspaceId = await criarWorkspace(accessToken);
+    const bankNumber = await gerarBankNumber();
 
     console.log("\n=== [3] Registrando BOLETO ===");
     const dueDate = calcularQuintoDiaUtilProximoMes();
@@ -282,11 +315,11 @@ app.post('/api/santander/boletos', async (req, res) => {
 
     const payload = {
       environment: "PRODUCAO",
-      nsuCode: `${clientNumber}${Date.now()}`,
+      nsuCode: gerarNSU(clientNumber),
       nsuDate: gerarNsuDate(),
       covenantCode: SANTANDER_CONFIG.COVENANT_CODE,
-      bankNumber: "0036",
-      clientNumber: clientNumber.toString().padStart(5,"0"),
+      bankNumber,
+      clientNumber: String(clientNumber).padStart(5, "0"),
       dueDate,
       issueDate: gerarIssueDate(),
       participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
@@ -330,7 +363,7 @@ app.post('/api/santander/boletos', async (req, res) => {
     );
 
     console.log("✅ Boleto registrado com sucesso!");
-    res.json({ success: true, message: 'Boleto registrado com sucesso', boletoId: boletoResponse.data.nsuCode, ...boletoResponse.data });
+    res.json({ success: true, message: 'Boleto registrado com sucesso', boletoId: boletoResponse.data.nsuCode, bankNumber, ...boletoResponse.data });
 
   } catch (error) {
     console.error("❌ Erro no fluxo Santander:", { message: error.message, status: error.response?.status, data: error.response?.data, stack: error.stack });
