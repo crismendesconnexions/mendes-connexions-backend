@@ -19,7 +19,7 @@ app.use(helmet({
 app.disable('x-powered-by');
 
 // =============================================
-// CONFIGURAÇÃO CORS
+// CONFIGURAÇÃO CORS ATUALIZADA
 // =============================================
 const corsOptions = {
   origin: [
@@ -42,7 +42,7 @@ app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Middleware de log
+// Middleware de log para debug
 app.use((req, res, next) => {
   console.log(`📥 ${req.method} ${req.path}`, {
     body: req.body,
@@ -77,7 +77,7 @@ try {
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   } else {
-    console.error('❌ FIREBASE_SERVICE_ACCOUNT não encontrado');
+    console.error('❌ FIREBASE_SERVICE_ACCOUNT não encontrado nas variáveis de ambiente');
   }
 } catch (err) {
   console.error('❌ Erro ao parsear FIREBASE_SERVICE_ACCOUNT:', err.message);
@@ -93,10 +93,10 @@ if (serviceAccount) {
     console.log('✅ Firebase Admin inicializado com sucesso');
     db = admin.firestore();
   } catch (error) {
-    console.error('❌ Erro ao inicializar Firebase Admin:', error);
+    console.error('❌ Erro crítico ao inicializar Firebase Admin:', error);
   }
 } else {
-  console.error('❌ Firebase Admin não inicializado');
+  console.error('❌ Firebase Admin não inicializado - serviceAccount indisponível');
 }
 
 // =============================================
@@ -111,13 +111,13 @@ const SANTANDER_CONFIG = {
 };
 
 // =============================================
-// AGENTE HTTPS
+// AGENTE HTTPS SANTANDER
 // =============================================
 function createHttpsAgent() {
   try {
     const certBase64 = process.env.SANTANDER_CERTIFICATE_CRT_B64;
     const keyBase64 = process.env.SANTANDER_PRIVATE_KEY_B64;
-
+    
     if (!certBase64 || !keyBase64) {
       console.error('❌ Certificado ou chave privada não encontrados');
       return null;
@@ -127,8 +127,8 @@ function createHttpsAgent() {
     const key = Buffer.from(keyBase64, 'base64').toString('utf-8');
 
     return new https.Agent({
-      cert,
-      key,
+      cert: cert,
+      key: key,
       rejectUnauthorized: true,
       keepAlive: true
     });
@@ -143,14 +143,21 @@ function createHttpsAgent() {
 // =============================================
 async function buscarClientNumber(lojistaId) {
   if (!db) { console.error('❌ Firestore não inicializado'); return null; }
+  
   try {
+    console.log('🔍 Buscando clientNumber para lojista:', lojistaId);
     const lojistaDoc = await db.collection('lojistas').doc(lojistaId).get();
+    
     if (!lojistaDoc.exists) { console.log('❌ Lojista não encontrado'); return null; }
+    
     const data = lojistaDoc.data();
     const clientNumber = data.clientNumber || data.idNumber;
+    
+    console.log('📋 Dados do lojista encontrado:', { exists: lojistaDoc.exists, clientNumber, nome: data.nomeFantasia || data.nome, cnpj: data.cnpj });
+    
     return clientNumber?.toString() || null;
   } catch (error) {
-    console.error('💥 Erro ao buscar clientNumber:', error);
+    console.error('💥 Erro ao buscar clientNumber no Firebase:', error);
     return null;
   }
 }
@@ -159,6 +166,8 @@ async function buscarClientNumber(lojistaId) {
 // FUNÇÃO: OBTER TOKEN SANTANDER
 // =============================================
 async function obterTokenSantander() {
+  console.log("\n=== [1] Solicitando TOKEN Santander ===");
+  
   const formData = new URLSearchParams({
     client_id: SANTANDER_CONFIG.CLIENT_ID,
     client_secret: SANTANDER_CONFIG.CLIENT_SECRET,
@@ -166,47 +175,65 @@ async function obterTokenSantander() {
     scope: 'collection_bill_management'
   });
 
-  const httpsAgent = createHttpsAgent();
-  if (!httpsAgent) throw new Error('Agente HTTPS não disponível');
+  try {
+    const httpsAgent = createHttpsAgent();
+    if (!httpsAgent) throw new Error('Agente HTTPS não disponível');
 
-  const response = await axios.post(
-    'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
-    formData,
-    { headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' }, httpsAgent, timeout: 30000 }
-  );
-
-  return response.data.access_token;
+    const response = await axios.post(
+      'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
+      formData,
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' }, httpsAgent, timeout: 30000 }
+    );
+    
+    console.log("✅ Token recebido com sucesso");
+    return response.data.access_token;
+  } catch (err) {
+    console.error("❌ Erro ao obter token Santander:", { status: err.response?.status, data: err.response?.data, message: err.message });
+    throw err;
+  }
 }
 
 // =============================================
 // FUNÇÃO: CRIAR WORKSPACE
 // =============================================
 async function criarWorkspace(accessToken) {
+  console.log("\n=== [2] Criando WORKSPACE ===");
+
   const payload = {
     type: "BILLING",
     description: "Workspace de Cobrança",
-    covenants: [{ code: SANTANDER_CONFIG.COVENANT_CODE }]
+    covenants: [
+      { code: SANTANDER_CONFIG.COVENANT_CODE }
+    ]
   };
 
-  const httpsAgent = createHttpsAgent();
-  if (!httpsAgent) throw new Error('Agente HTTPS não disponível');
+  console.log("➡️ Payload Workspace:", JSON.stringify(payload, null, 2));
 
-  const response = await axios.post(
-    'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
-    payload,
-    {
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${accessToken}`,
-        'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
-        'Accept': 'application/json'
-      },
-      httpsAgent,
-      timeout: 30000
-    }
-  );
+  try {
+    const httpsAgent = createHttpsAgent();
+    if (!httpsAgent) throw new Error('Agente HTTPS não disponível');
 
-  return response.data.id;
+    const response = await axios.post(
+      'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
+      payload,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`,
+          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+          'Accept': 'application/json'
+        },
+        httpsAgent,
+        timeout: 30000
+      }
+    );
+
+    console.log("✅ Workspace criada:", response.data.id);
+    return response.data.id;
+  } catch (error) {
+    console.error("❌ Erro ao criar workspace:", { status: error.response?.status, data: error.response?.data, message: error.message });
+    throw error;
+  }
 }
 
 // =============================================
@@ -228,43 +255,44 @@ function calcularQuintoDiaUtilProximoMes() {
   return data.toISOString().split('T')[0];
 }
 
-function gerarNsu() {
-  // NSU seguro: timestamp + random 4 dígitos
-  return `${Date.now()}${Math.floor(Math.random() * 9000 + 1000)}`;
-}
 function gerarNsuDate() { return new Date().toISOString().split('T')[0]; }
 function gerarIssueDate() { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().split('T')[0]; }
 function gerarDiscountLimitDate() { const d = new Date(); d.setDate(d.getDate() + 5); return d.toISOString().split('T')[0]; }
-function formatarValorParaSantander(valor) { return parseFloat(valor).toFixed(2); }
 
 // =============================================
 // ROTA: REGISTRAR BOLETO
 // =============================================
 app.post('/api/santander/boletos', async (req, res) => {
+  console.log("📥 Recebendo requisição para gerar boleto...");
+
   const { dadosBoleto, lojistaId } = req.body;
   if (!dadosBoleto || !lojistaId) return res.status(400).json({ error: 'Dados do boleto ou ID do lojista não fornecidos' });
 
   try {
     const clientNumber = await buscarClientNumber(lojistaId);
-    if (!clientNumber) return res.status(400).json({ error: 'ClientNumber do lojista não encontrado' });
+    if (!clientNumber) return res.status(400).json({ error: 'ClientNumber do lojista não encontrado no Firebase' });
 
     const accessToken = await obterTokenSantander();
     const workspaceId = await criarWorkspace(accessToken);
 
+    console.log("\n=== [3] Registrando BOLETO ===");
+
     const dueDate = calcularQuintoDiaUtilProximoMes();
+    const nsuDate = gerarNsuDate();
+    const issueDate = gerarIssueDate();
     const discountLimitDate = gerarDiscountLimitDate();
 
     const payload = {
       environment: "PRODUCAO",
-      nsuCode: gerarNsu(),
-      nsuDate: gerarNsuDate(),
+      nsuCode: `${clientNumber}${Date.now()}`,
+      nsuDate: nsuDate,
       covenantCode: SANTANDER_CONFIG.COVENANT_CODE,
       bankNumber: "0036",
-      clientNumber: clientNumber.toString().padStart(5,"0"),
-      dueDate,
-      issueDate: gerarIssueDate(),
+      clientNumber: clientNumber.toString().padStart(5, "0"),
+      dueDate: dueDate,
+      issueDate: issueDate,
       participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
-      nominalValue: formatarValorParaSantander(dadosBoleto.valorCompra),
+      nominalValue: parseFloat(dadosBoleto.valorCompra).toFixed(2),
       payer: {
         name: dadosBoleto.pagadorNome.toUpperCase(),
         documentType: "CNPJ",
@@ -280,13 +308,21 @@ app.post('/api/santander/boletos', async (req, res) => {
       paymentType: "REGISTRO",
       writeOffQuantityDays: "30",
       messages: ["mensagem um", "mensagem dois"],
-      key: { type: "CNPJ", dictKey: SANTANDER_CONFIG.DICT_KEY },
+      key: {
+        type: "CNPJ",
+        dictKey: SANTANDER_CONFIG.DICT_KEY
+      },
       discount: {
         type: "VALOR_DATA_FIXA",
-        discountOne: { value: "0.50", limitDate: discountLimitDate }
+        discountOne: {
+          value: "0.50",
+          limitDate: discountLimitDate
+        }
       },
       interestPercentage: "05.00"
     };
+
+    console.log("📦 Payload Boleto:", JSON.stringify(payload, null, 2));
 
     const httpsAgent = createHttpsAgent();
     const boletoResponse = await axios.post(
@@ -304,11 +340,21 @@ app.post('/api/santander/boletos', async (req, res) => {
       }
     );
 
+    console.log("✅ Boleto registrado com sucesso!");
     res.json({ success: true, message: 'Boleto registrado com sucesso', boletoId: boletoResponse.data.nsuCode, ...boletoResponse.data });
 
   } catch (error) {
-    console.error("❌ Erro no fluxo Santander:", { message: error.message, status: error.response?.status, data: error.response?.data });
-    res.status(500).json({ error: 'Falha no processo Santander', details: error.response?.data || error.message });
+    console.error("❌ Erro no fluxo Santander:", {
+      message: error.message,
+      status: error.response?.status,
+      data: error.response?.data,
+      stack: error.stack
+    });
+    res.status(500).json({
+      error: 'Falha no processo Santander',
+      details: error.response?.data || error.message,
+      step: 'registro_boleto'
+    });
   }
 });
 
@@ -320,4 +366,5 @@ app.listen(PORT, () => {
   console.log('Servidor rodando na porta', PORT);
   console.log('Ambiente:', process.env.NODE_ENV || 'development');
   console.log('Health check: http://0.0.0.0:' + PORT + '/health');
+  console.log('====================================================');
 });
