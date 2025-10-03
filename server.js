@@ -387,7 +387,7 @@ app.post('/api/santander/boletos/pdf', async (req, res) => {
 
     // Monta a URL substituindo {digitableLine}
     const url = `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`;
-
+      
     const payload = { payerDocumentNumber };
 
     console.log("➡️ Payload PDF:", JSON.stringify(payload, null, 2));
