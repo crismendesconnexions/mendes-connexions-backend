@@ -194,16 +194,21 @@ async function obterTokenSantander() {
 }
 
 // =============================================
-// FUNÇÃO: CRIAR WORKSPACE
+// FUNÇÃO: CRIAR WORKSPACE (CORRIGIDO)
 // =============================================
 async function criarWorkspace(accessToken) {
   console.log("\n=== [2] Criando WORKSPACE ===");
 
   const payload = {
-    type: "BILLING",
+    type: "COLLECTION",                   // ✅ Ajustado para tipo aceito
     description: "Workspace Mendes Connexions",
-    covenants: [{ code: SANTANDER_CONFIG.COVENANT_CODE.toString() }],
-    workspaceType: "BILLING"
+    workspaceType: "COLLECTION",          // ✅ Ajustado
+    covenants: [
+      {
+        code: SANTANDER_CONFIG.COVENANT_CODE.toString(),
+        participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE
+      }
+    ]
   };
 
   console.log("➡️ Payload Workspace:", JSON.stringify(payload, null, 2));
