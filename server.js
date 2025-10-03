@@ -197,9 +197,7 @@ async function obterTokenSantander() {
 
   try {
     const httpsAgent = createHttpsAgent();
-    if (!httpsAgent) {
-      throw new Error('Agente HTTPS não disponível');
-    }
+    if (!httpsAgent) throw new Error('Agente HTTPS não disponível');
 
     const response = await axios.post(
       'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
@@ -234,7 +232,7 @@ async function criarWorkspace(accessToken) {
 
   const payload = {
     type: "BILLING",
-    description: "Workspace Mendes Connexions", // texto simples
+    description: "Workspace Mendes Connexions",
     covenants: [{ code: SANTANDER_CONFIG.COVENANT_CODE.toString() }],
     workspaceType: "BILLING"
   };
@@ -274,7 +272,7 @@ async function criarWorkspace(accessToken) {
       console.error("💥 Detalhes do Validation Error:", JSON.stringify(error.response.data._errors, null, 2));
     }
 
-    // Tentativa de fallback com payload mínimo
+    // Fallback mínimo
     try {
       console.log("⚡ Tentando criar workspace com payload mínimo...");
       const fallbackPayload = {
@@ -342,6 +340,10 @@ function gerarNsuDate() { return new Date().toISOString().split('T')[0]; }
 function gerarIssueDate() { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().split('T')[0]; }
 function gerarDiscountLimitDate() { const d = new Date(); d.setDate(d.getDate() + 5); return d.toISOString().split('T')[0]; }
 
+function formatarValorParaSantander(valor) {
+  return parseFloat(valor).toFixed(2).replace('.', ',');
+}
+
 // =============================================
 // ROTA PRINCIPAL: REGISTRAR BOLETO
 // =============================================
@@ -374,9 +376,9 @@ app.post('/api/santander/boletos', async (req, res) => {
       dueDate,
       issueDate: gerarIssueDate(),
       participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
-      nominalValue: parseFloat(dadosBoleto.valorCompra).toFixed(2),
+      nominalValue: formatarValorParaSantander(dadosBoleto.valorCompra),
       documentKind: "DUPLICATA_MERCANTIL",
-      deductionValue: "0.00",
+      deductionValue: "0,00",
       paymentType: "REGISTRO",
       writeOffQuantityDays: "30",
       messages: ["Pagamento até o 5o dia útil de cada mes", "Protestar após 30 dias de vencimento"],
@@ -397,11 +399,11 @@ app.post('/api/santander/boletos', async (req, res) => {
       discount: {
         type: "VALOR_DATA_FIXA",
         discountOne: {
-          value: "0.50",
+          value: formatarValorParaSantander(0.50),
           limitDate: discountLimitDate
         }
       },
-      interestPercentage: "05.00"
+      interestPercentage: formatarValorParaSantander(5)
     };
 
     console.log("📦 Payload Boleto:", JSON.stringify(payload, null, 2));
@@ -477,4 +479,3 @@ app.listen(PORT, () => {
   console.log('Health check: http://0.0.0.0:' + PORT + '/health');
   console.log('====================================================');
 });
-
