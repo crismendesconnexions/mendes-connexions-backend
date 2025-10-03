@@ -348,4 +348,3 @@ app.listen(PORT, () => {
   console.log('Health check: http://0.0.0.0:' + PORT + '/health');
   console.log('====================================================');
 });
-
