@@ -33,9 +33,8 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
   optionsSuccessStatus: 200
 };
-
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // Pré-flight para todas as rotas
+app.options('*', cors(corsOptions));
 
 // =============================================
 // MIDDLEWARES GLOBAIS
@@ -140,42 +139,23 @@ function createHttpsAgent() {
 }
 
 // =============================================
-// FUNÇÃO ATUALIZADA: BUSCAR CLIENT NUMBER
+// FUNÇÃO: BUSCAR CLIENT NUMBER
 // =============================================
 async function buscarClientNumber(lojistaId) {
-  if (!db) {
-    console.error('❌ Firestore não inicializado');
-    return null;
-  }
+  if (!db) { console.error('❌ Firestore não inicializado'); return null; }
   
   try {
     console.log('🔍 Buscando clientNumber para lojista:', lojistaId);
-    
     const lojistaDoc = await db.collection('lojistas').doc(lojistaId).get();
     
-    if (lojistaDoc.exists) {
-      const lojistaData = lojistaDoc.data();
-      const clientNumber = lojistaData.clientNumber || lojistaData.idNumber;
-      
-      console.log('📋 Dados do lojista encontrado:', {
-        exists: lojistaDoc.exists,
-        clientNumber: clientNumber,
-        nome: lojistaData.nomeFantasia || lojistaData.nome,
-        cnpj: lojistaData.cnpj
-      });
-      
-      if (clientNumber) {
-        console.log('✅ ClientNumber encontrado:', clientNumber);
-        return clientNumber.toString();
-      } else {
-        console.log('❌ ClientNumber não encontrado nos dados do lojista');
-        console.log('Campos disponíveis:', Object.keys(lojistaData));
-        return null;
-      }
-    } else {
-      console.log('❌ Lojista não encontrado no Firestore');
-      return null;
-    }
+    if (!lojistaDoc.exists) { console.log('❌ Lojista não encontrado'); return null; }
+    
+    const data = lojistaDoc.data();
+    const clientNumber = data.clientNumber || data.idNumber;
+    
+    console.log('📋 Dados do lojista encontrado:', { exists: lojistaDoc.exists, clientNumber, nome: data.nomeFantasia || data.nome, cnpj: data.cnpj });
+    
+    return clientNumber?.toString() || null;
   } catch (error) {
     console.error('💥 Erro ao buscar clientNumber no Firebase:', error);
     return null;
@@ -183,7 +163,7 @@ async function buscarClientNumber(lojistaId) {
 }
 
 // =============================================
-// FUNÇÕES AUXILIARES SANTANDER
+// FUNÇÃO: OBTER TOKEN SANTANDER
 // =============================================
 async function obterTokenSantander() {
   console.log("\n=== [1] Solicitando TOKEN Santander ===");
@@ -202,30 +182,19 @@ async function obterTokenSantander() {
     const response = await axios.post(
       'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
       formData,
-      {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Accept': 'application/json'
-        },
-        httpsAgent,
-        timeout: 30000
-      }
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' }, httpsAgent, timeout: 30000 }
     );
     
     console.log("✅ Token recebido com sucesso");
     return response.data.access_token;
   } catch (err) {
-    console.error("❌ Erro ao obter token Santander:", {
-      status: err.response?.status,
-      data: err.response?.data,
-      message: err.message
-    });
+    console.error("❌ Erro ao obter token Santander:", { status: err.response?.status, data: err.response?.data, message: err.message });
     throw err;
   }
 }
 
 // =============================================
-// CRIAR WORKSPACE COM FALLBACK E LOGS DETALHADOS
+// FUNÇÃO: CRIAR WORKSPACE
 // =============================================
 async function criarWorkspace(accessToken) {
   console.log("\n=== [2] Criando WORKSPACE ===");
@@ -246,93 +215,33 @@ async function criarWorkspace(accessToken) {
     const response = await axios.post(
       'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
       payload,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`,
-          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
-          'Accept': 'application/json'
-        },
-        httpsAgent,
-        timeout: 30000
-      }
+      { headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}`, 'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID, 'Accept': 'application/json' }, httpsAgent, timeout: 30000 }
     );
 
     console.log("✅ Workspace criada:", response.data.id);
     return response.data.id;
-
   } catch (error) {
-    console.error("❌ Erro ao criar workspace:", {
-      status: error.response?.status,
-      data: error.response?.data,
-      message: error.message
-    });
-
-    if (error.response?.data?._errors) {
-      console.error("💥 Detalhes do Validation Error:", JSON.stringify(error.response.data._errors, null, 2));
-    }
-
-    // Fallback mínimo
-    try {
-      console.log("⚡ Tentando criar workspace com payload mínimo...");
-      const fallbackPayload = {
-        type: "BILLING",
-        covenants: [{ code: SANTANDER_CONFIG.COVENANT_CODE.toString() }]
-      };
-
-      const fallbackResponse = await axios.post(
-        'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
-        fallbackPayload,
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`,
-            'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
-            'Accept': 'application/json'
-          },
-          httpsAgent: createHttpsAgent(),
-          timeout: 30000
-        }
-      );
-
-      console.log("✅ Workspace criada com payload mínimo:", fallbackResponse.data.id);
-      return fallbackResponse.data.id;
-
-    } catch (fallbackError) {
-      console.error("❌ Fallback workspace também falhou:", {
-        status: fallbackError.response?.status,
-        data: fallbackError.response?.data,
-        message: fallbackError.message
-      });
-
-      if (fallbackError.response?.data?._errors) {
-        console.error("💥 Detalhes do Validation Error do fallback:", JSON.stringify(fallbackError.response.data._errors, null, 2));
-      }
-
-      throw fallbackError;
-    }
+    console.error("❌ Erro ao criar workspace:", { status: error.response?.status, data: error.response?.data, message: error.message });
+    throw error;
   }
 }
 
 // =============================================
-// FUNÇÕES DE DATA
+// FUNÇÕES AUXILIARES DE DATA
 // =============================================
 function calcularQuintoDiaUtilProximoMes() {
   const hoje = new Date();
   let ano = hoje.getFullYear();
   let mes = hoje.getMonth() + 1;
   if (mes === 12) { mes = 1; ano += 1 } else { mes += 1 }
-
   const data = new Date(ano, mes - 1, 1);
   let diasUteis = 0;
-
   while (diasUteis < 5) {
     const diaSemana = data.getDay();
     if (diaSemana !== 0 && diaSemana !== 6) diasUteis++;
     if (diasUteis === 5) break;
     data.setDate(data.getDate() + 1);
   }
-
   return data.toISOString().split('T')[0];
 }
 
@@ -341,11 +250,11 @@ function gerarIssueDate() { const d = new Date(); d.setDate(d.getDate() + 1); re
 function gerarDiscountLimitDate() { const d = new Date(); d.setDate(d.getDate() + 5); return d.toISOString().split('T')[0]; }
 
 function formatarValorParaSantander(valor) {
-  return parseFloat(valor).toFixed(2).replace('.', ',');
+  return parseFloat(valor).toFixed(2);
 }
 
 // =============================================
-// ROTA PRINCIPAL: REGISTRAR BOLETO
+// ROTA: REGISTRAR BOLETO
 // =============================================
 app.post('/api/santander/boletos', async (req, res) => {
   console.log("📥 Recebendo requisição para gerar boleto...");
@@ -354,11 +263,9 @@ app.post('/api/santander/boletos', async (req, res) => {
   if (!dadosBoleto || !lojistaId) return res.status(400).json({ error: 'Dados do boleto ou ID do lojista não fornecidos' });
 
   try {
-    console.log("👤 Lojista ID recebido:", lojistaId);
     const clientNumber = await buscarClientNumber(lojistaId);
     if (!clientNumber) return res.status(400).json({ error: 'ClientNumber do lojista não encontrado no Firebase' });
 
-    console.log("✅ ClientNumber encontrado, obtendo token...");
     const accessToken = await obterTokenSantander();
     const workspaceId = await criarWorkspace(accessToken);
 
@@ -370,7 +277,7 @@ app.post('/api/santander/boletos', async (req, res) => {
       environment: "PRODUCAO",
       nsuCode: `${clientNumber}${Date.now()}`,
       nsuDate: gerarNsuDate(),
-      covenantCode: parseInt(SANTANDER_CONFIG.COVENANT_CODE),
+      covenantCode: SANTANDER_CONFIG.COVENANT_CODE.toString(),
       bankNumber: "0036",
       clientNumber: clientNumber,
       dueDate,
@@ -378,7 +285,7 @@ app.post('/api/santander/boletos', async (req, res) => {
       participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
       nominalValue: formatarValorParaSantander(dadosBoleto.valorCompra),
       documentKind: "DUPLICATA_MERCANTIL",
-      deductionValue: "0,00",
+      deductionValue: "0.00",
       paymentType: "REGISTRO",
       writeOffQuantityDays: "30",
       messages: ["Pagamento até o 5o dia útil de cada mes", "Protestar após 30 dias de vencimento"],
@@ -398,10 +305,9 @@ app.post('/api/santander/boletos', async (req, res) => {
       },
       discount: {
         type: "VALOR_DATA_FIXA",
-        discountOne: {
-          value: formatarValorParaSantander(0.50),
-          limitDate: discountLimitDate
-        }
+        discounts: [
+          { value: formatarValorParaSantander(0.50), limitDate: discountLimitDate }
+        ]
       },
       interestPercentage: formatarValorParaSantander(5)
     };
@@ -412,60 +318,15 @@ app.post('/api/santander/boletos', async (req, res) => {
     const boletoResponse = await axios.post(
       `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips`,
       payload,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
-          'Authorization': `Bearer ${accessToken}`,
-          'Accept': 'application/json'
-        },
-        httpsAgent,
-        timeout: 30000
-      }
+      { headers: { 'Content-Type': 'application/json', 'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID, 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }, httpsAgent, timeout: 30000 }
     );
 
     console.log("✅ Boleto registrado com sucesso!");
     res.json({ success: true, message: 'Boleto registrado com sucesso', boletoId: boletoResponse.data.nsuCode, ...boletoResponse.data });
 
   } catch (error) {
-    console.error("❌ Erro no fluxo Santander:", {
-      message: error.message,
-      status: error.response?.status,
-      data: error.response?.data,
-      stack: error.stack
-    });
+    console.error("❌ Erro no fluxo Santander:", { message: error.message, status: error.response?.status, data: error.response?.data, stack: error.stack });
     res.status(500).json({ error: 'Falha no processo Santander', details: error.response?.data || error.message, step: 'registro_boleto' });
-  }
-});
-
-// =============================================
-// ROTA: BUSCAR DADOS LOJISTA
-// =============================================
-app.get('/api/lojista/:lojistaId', async (req, res) => {
-  const { lojistaId } = req.params;
-  if (!db) return res.status(500).json({ error: 'Firestore não disponível' });
-
-  try {
-    const lojistaDoc = await db.collection('lojistas').doc(lojistaId).get();
-    if (!lojistaDoc.exists) return res.status(404).json({ error: 'Lojista não encontrado' });
-
-    res.json({ id: lojistaId, ...lojistaDoc.data() });
-  } catch (error) {
-    console.error('Erro ao buscar lojista:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-});
-
-// =============================================
-// ROTA DE TESTE SANTANDER
-// =============================================
-app.get('/api/santander/test', async (req, res) => {
-  try {
-    console.log('🧪 Testando conexão com Santander...');
-    const token = await obterTokenSantander();
-    res.json({ success: true, message: 'Conexão com Santander OK', tokenReceived: !!token });
-  } catch (error) {
-    res.status(500).json({ success: false, message: 'Falha ao conectar com Santander', error: error.message });
   }
 });
 
