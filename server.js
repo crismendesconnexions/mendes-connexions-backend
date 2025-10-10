@@ -293,23 +293,33 @@ async function gerarBankNumber() {
 }
 
 // =============================================
-// ROTA: REGISTRAR BOLETO
+// ROTA: REGISTRAR BOLETO (2% do valorCompra)
 // =============================================
 app.post('/api/santander/boletos', async (req, res) => {
   console.log("📥 Recebendo requisição para gerar boleto...");
   
   const { dadosBoleto, lojistaId } = req.body;
-  if (!dadosBoleto || !lojistaId) return res.status(400).json({ error: 'Dados do boleto ou ID do lojista não fornecidos' });
+  if (!dadosBoleto || !lojistaId) {
+    return res.status(400).json({ error: 'Dados do boleto ou ID do lojista não fornecidos' });
+  }
 
   try {
     const clientNumber = await buscarClientNumber(lojistaId);
-    if (!clientNumber) return res.status(400).json({ error: 'ClientNumber do lojista não encontrado no Firebase' });
+    if (!clientNumber) {
+      return res.status(400).json({ error: 'ClientNumber do lojista não encontrado no Firebase' });
+    }
 
     const accessToken = await obterTokenSantander();
     const workspaceId = await criarWorkspace(accessToken);
     const bankNumber = await gerarBankNumber();
 
     console.log("\n=== [3] Registrando BOLETO ===");
+
+    // 🔹 Cálculo do valor do boleto (2% do valorCompra)
+    const valorBase = parseFloat(dadosBoleto.valorCompra);
+    const valorBoleto = valorBase * 0.02; // 2% do valor de compra
+    console.log(`💰 Valor base: R$${valorBase.toFixed(2)} → Valor do boleto (2%): R$${valorBoleto.toFixed(2)}`);
+
     const dueDate = calcularQuintoDiaUtilProximoMes();
     const discountLimitDate = gerarDiscountLimitDate();
 
@@ -323,7 +333,7 @@ app.post('/api/santander/boletos', async (req, res) => {
       dueDate,
       issueDate: gerarIssueDate(),
       participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
-      nominalValue: formatarValorParaSantander(dadosBoleto.valorCompra),
+      nominalValue: formatarValorParaSantander(valorBoleto), // ✅ 2% aplicado aqui
       payer: {
         name: dadosBoleto.pagadorNome.toUpperCase(),
         documentType: "CNPJ",
@@ -359,19 +369,46 @@ app.post('/api/santander/boletos', async (req, res) => {
     const boletoResponse = await axios.post(
       `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips`,
       payload,
-      { headers: { 'Content-Type': 'application/json', 'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID, 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }, httpsAgent, timeout: 30000 }
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+          'Authorization': `Bearer ${accessToken}`,
+          'Accept': 'application/json'
+        },
+        httpsAgent,
+        timeout: 30000
+      }
     );
 
     console.log("✅ Boleto registrado com sucesso!");
-    res.json({ success: true, message: 'Boleto registrado com sucesso', boletoId: boletoResponse.data.nsuCode, bankNumber, ...boletoResponse.data });
+    res.json({
+      success: true,
+      message: 'Boleto registrado com sucesso',
+      valorBase,
+      valorBoleto: valorBoleto.toFixed(2),
+      boletoId: boletoResponse.data.nsuCode,
+      bankNumber,
+      ...boletoResponse.data
+    });
 
   } catch (error) {
-    console.error("❌ Erro no fluxo Santander:", { message: error.message, status: error.response?.status, data: error.response?.data, stack: error.stack });
-    res.status(500).json({ error: 'Falha no processo Santander', details: error.response?.data || error.message, step: 'registro_boleto' });
+    console.error("❌ Erro no fluxo Santander:", {
+      message: error.message,
+      status: error.response?.status,
+      data: error.response?.data,
+      stack: error.stack
+    });
+    res.status(500).json({
+      error: 'Falha no processo Santander',
+      details: error.response?.data || error.message,
+      step: 'registro_boleto'
+    });
   }
 });
+
 // =============================================
-// ROTA: BAIXAR PDF DO BOLETO DIRETO
+// ROTA: BAIXAR PDF DO BOLETO
 // =============================================
 app.post('/api/santander/boletos/pdf', async (req, res) => {
   console.log("📥 Recebendo requisição para baixar PDF do boleto...");
@@ -385,40 +422,54 @@ app.post('/api/santander/boletos/pdf', async (req, res) => {
     const accessToken = await obterTokenSantander();
     const httpsAgent = createHttpsAgent();
 
-    // URL para baixar PDF (dependendo da doc Santander)
-    const url = `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips/pdf`;
+    // Monta a URL substituindo {digitableLine}
+    const url = `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`;
+      
+    const payload = { payerDocumentNumber };
 
-    console.log("➡️ URL PDF:", url);
+    console.log("➡️ Payload PDF:", JSON.stringify(payload, null, 2));
+    console.log("➡️ URL:", url);
 
-    // Faz download do PDF como arraybuffer
-    const response = await axios.get(url, {
+    const response = await axios.post(url, payload, {
       headers: {
+        "Content-Type": "application/json",
         "Authorization": `Bearer ${accessToken}`,
         "X-Application-Key": SANTANDER_CONFIG.CLIENT_ID,
-        "Accept": "application/pdf"
+        "Accept": "application/json"
       },
-      responseType: 'arraybuffer',
       httpsAgent,
       timeout: 30000
     });
 
-    // Configura headers para download
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename=boleto_${digitableLine}.pdf`);
-    res.send(response.data);
+    // Extrai o link da resposta
+    const link = response.data?.link || response.data?.url;
 
-    console.log("✅ PDF enviado direto para o cliente!");
+    if (!link) {
+      console.error("⚠️ Nenhum link retornado pelo Santander:", response.data);
+      return res.status(500).json({
+        error: "Resposta do Santander não contém link do PDF",
+        rawResponse: response.data
+      });
+    }
+
+    console.log("✅ PDF gerado com sucesso! Link:", link);
+
+    res.json({
+      success: true,
+      message: "PDF gerado com sucesso",
+      link
+    });
 
   } catch (error) {
-    console.error("❌ Erro ao baixar PDF do boleto:", {
+    console.error("❌ Erro ao gerar PDF do boleto:", {
       message: error.message,
       status: error.response?.status,
       data: error.response?.data
     });
     res.status(500).json({
-      error: "Falha ao baixar PDF do boleto",
+      error: "Falha ao gerar PDF do boleto",
       details: error.response?.data || error.message,
-      step: "baixar_pdf"
+      step: "gerar_pdf"
     });
   }
 });
