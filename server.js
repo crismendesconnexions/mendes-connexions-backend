@@ -293,33 +293,23 @@ async function gerarBankNumber() {
 }
 
 // =============================================
-// ROTA: REGISTRAR BOLETO (2% do valorCompra)
+// ROTA: REGISTRAR BOLETO
 // =============================================
 app.post('/api/santander/boletos', async (req, res) => {
   console.log("📥 Recebendo requisição para gerar boleto...");
   
   const { dadosBoleto, lojistaId } = req.body;
-  if (!dadosBoleto || !lojistaId) {
-    return res.status(400).json({ error: 'Dados do boleto ou ID do lojista não fornecidos' });
-  }
+  if (!dadosBoleto || !lojistaId) return res.status(400).json({ error: 'Dados do boleto ou ID do lojista não fornecidos' });
 
   try {
     const clientNumber = await buscarClientNumber(lojistaId);
-    if (!clientNumber) {
-      return res.status(400).json({ error: 'ClientNumber do lojista não encontrado no Firebase' });
-    }
+    if (!clientNumber) return res.status(400).json({ error: 'ClientNumber do lojista não encontrado no Firebase' });
 
     const accessToken = await obterTokenSantander();
     const workspaceId = await criarWorkspace(accessToken);
     const bankNumber = await gerarBankNumber();
 
     console.log("\n=== [3] Registrando BOLETO ===");
-
-    // 🔹 Cálculo do valor do boleto (2% do valorCompra)
-    const valorBase = parseFloat(dadosBoleto.valorCompra);
-    const valorBoleto = valorBase * 0.02; // 2% do valor de compra
-    console.log(`💰 Valor base: R$${valorBase.toFixed(2)} → Valor do boleto (2%): R$${valorBoleto.toFixed(2)}`);
-
     const dueDate = calcularQuintoDiaUtilProximoMes();
     const discountLimitDate = gerarDiscountLimitDate();
 
@@ -333,7 +323,7 @@ app.post('/api/santander/boletos', async (req, res) => {
       dueDate,
       issueDate: gerarIssueDate(),
       participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
-      nominalValue: formatarValorParaSantander(valorBoleto), // ✅ 2% aplicado aqui
+      nominalValue: formatarValorParaSantander(dadosBoleto.valorCompra * 0.02),
       payer: {
         name: dadosBoleto.pagadorNome.toUpperCase(),
         documentType: "CNPJ",
@@ -369,44 +359,17 @@ app.post('/api/santander/boletos', async (req, res) => {
     const boletoResponse = await axios.post(
       `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips`,
       payload,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
-          'Authorization': `Bearer ${accessToken}`,
-          'Accept': 'application/json'
-        },
-        httpsAgent,
-        timeout: 30000
-      }
+      { headers: { 'Content-Type': 'application/json', 'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID, 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' }, httpsAgent, timeout: 30000 }
     );
 
     console.log("✅ Boleto registrado com sucesso!");
-    res.json({
-      success: true,
-      message: 'Boleto registrado com sucesso',
-      valorBase,
-      valorBoleto: valorBoleto.toFixed(2),
-      boletoId: boletoResponse.data.nsuCode,
-      bankNumber,
-      ...boletoResponse.data
-    });
+    res.json({ success: true, message: 'Boleto registrado com sucesso', boletoId: boletoResponse.data.nsuCode, bankNumber, ...boletoResponse.data });
 
   } catch (error) {
-    console.error("❌ Erro no fluxo Santander:", {
-      message: error.message,
-      status: error.response?.status,
-      data: error.response?.data,
-      stack: error.stack
-    });
-    res.status(500).json({
-      error: 'Falha no processo Santander',
-      details: error.response?.data || error.message,
-      step: 'registro_boleto'
-    });
+    console.error("❌ Erro no fluxo Santander:", { message: error.message, status: error.response?.status, data: error.response?.data, stack: error.stack });
+    res.status(500).json({ error: 'Falha no processo Santander', details: error.response?.data || error.message, step: 'registro_boleto' });
   }
 });
-
 // =============================================
 // ROTA: BAIXAR PDF DO BOLETO
 // =============================================
