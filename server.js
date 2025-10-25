@@ -52,6 +52,57 @@ app.use((req, res, next) => {
 });
 
 // =============================================
+// MIDDLEWARE DE AUTENTICAÇÃO FIREBASE
+// =============================================
+const authenticateFirebase = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        error: 'Token de autenticação não fornecido',
+        details: 'Formato esperado: Bearer <token>'
+      });
+    }
+
+    const token = authHeader.split('Bearer ')[1];
+    
+    if (!token) {
+      return res.status(401).json({
+        error: 'Token inválido',
+        details: 'Token não encontrado no header Authorization'
+      });
+    }
+
+    // Verificar se o Firebase Admin foi inicializado
+    if (!admin.apps.length) {
+      return res.status(500).json({
+        error: 'Serviço de autenticação indisponível',
+        details: 'Firebase Admin não inicializado'
+      });
+    }
+
+    // Verificar token com Firebase Admin
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    req.user = decodedToken;
+    
+    console.log('✅ Usuário autenticado:', {
+      uid: decodedToken.uid,
+      email: decodedToken.email
+    });
+    
+    next();
+  } catch (error) {
+    console.error('❌ Erro na autenticação Firebase:', error);
+    
+    return res.status(401).json({
+      error: 'Token inválido ou expirado',
+      details: error.message
+    });
+  }
+};
+
+// =============================================
 // HEALTH CHECK
 // =============================================
 app.get('/health', (req, res) => {
@@ -137,6 +188,85 @@ function createHttpsAgent() {
     return null;
   }
 }
+
+// =============================================
+// ROTA: UPLOAD PARA CLOUDINARY
+// =============================================
+app.post('/api/cloudinary/upload-pdf', authenticateFirebase, async (req, res) => {
+  try {
+    const { pdfUrl, fileName, pontuacaoId } = req.body;
+    
+    console.log('☁️ Iniciando upload para Cloudinary via backend...');
+    console.log('📄 Dados do upload:', { pdfUrl, fileName, pontuacaoId });
+    
+    // Validar dados obrigatórios
+    if (!pdfUrl || !fileName) {
+      return res.status(400).json({
+        error: 'Dados incompletos',
+        details: 'pdfUrl e fileName são obrigatórios'
+      });
+    }
+
+    // Baixar o PDF
+    console.log('⬇️ Baixando PDF da URL...');
+    const pdfResponse = await fetch(pdfUrl);
+    if (!pdfResponse.ok) {
+      throw new Error(`Erro ao baixar PDF: ${pdfResponse.status}`);
+    }
+    
+    const pdfBlob = await pdfResponse.blob();
+    console.log(`✅ PDF baixado com sucesso. Tamanho: ${pdfBlob.size} bytes`);
+
+    // Fazer upload para Cloudinary
+    console.log('⬆️ Iniciando upload para Cloudinary...');
+    const formData = new FormData();
+    formData.append('file', pdfBlob, fileName);
+    formData.append('upload_preset', 'boletos');
+    formData.append('folder', 'boletos-mendes-connexions');
+    
+    const cloudinaryResponse = await fetch(`https://api.cloudinary.com/v1_1/dno43pc3o/upload`, {
+      method: 'POST',
+      body: formData
+    });
+    
+    if (!cloudinaryResponse.ok) {
+      const errorData = await cloudinaryResponse.json();
+      throw new Error(errorData.error?.message || 'Erro ao fazer upload para Cloudinary');
+    }
+    
+    const cloudinaryData = await cloudinaryResponse.json();
+    
+    console.log('✅ Upload para Cloudinary realizado com sucesso:', cloudinaryData.secure_url);
+
+    // Se temos um pontuacaoId, atualizar no Firebase
+    if (pontuacaoId && db) {
+      try {
+        await db.collection('pontuacoes').doc(pontuacaoId).update({
+          comprovanteUrl: cloudinaryData.secure_url,
+          comprovantePublicId: cloudinaryData.public_id,
+          comprovanteUploadedAt: new Date().toISOString()
+        });
+        console.log('✅ URL do comprovante salva no Firebase para pontuacaoId:', pontuacaoId);
+      } catch (firebaseError) {
+        console.error('⚠️ Erro ao salvar no Firebase, mas upload foi bem sucedido:', firebaseError);
+        // Não falha a requisição se só o Firebase der erro
+      }
+    }
+    
+    res.json({
+      success: true,
+      cloudinaryUrl: cloudinaryData.secure_url,
+      publicId: cloudinaryData.public_id,
+      message: 'Upload realizado com sucesso'
+    });
+    
+  } catch (error) {
+    console.error('❌ Erro no upload para Cloudinary:', error);
+    res.status(500).json({
+      error: 'Erro ao fazer upload para Cloudinary: ' + error.message
+    });
+  }
+});
 
 // =============================================
 // FUNÇÃO: BUSCAR CLIENT NUMBER
