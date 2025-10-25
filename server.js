@@ -269,6 +269,153 @@ app.post('/api/cloudinary/upload-pdf', authenticateFirebase, async (req, res) =>
 });
 
 // =============================================
+// ROTA: DOWNLOAD VIA BACKEND (SOLUÇÃO DEFINITIVA)
+// =============================================
+app.get('/api/download-boleto/:pontuacaoId', authenticateFirebase, async (req, res) => {
+  try {
+    const { pontuacaoId } = req.params;
+    
+    console.log('📥 Iniciando download via backend para:', pontuacaoId);
+    
+    // Buscar dados da pontuação
+    const pontuacaoDoc = await db.collection('pontuacoes').doc(pontuacaoId).get();
+    
+    if (!pontuacaoDoc.exists) {
+      return res.status(404).json({ error: 'Pontuação não encontrada' });
+    }
+    
+    const pontuacaoData = pontuacaoDoc.data();
+    
+    if (!pontuacaoData.comprovanteUrl) {
+      return res.status(404).json({ error: 'PDF não disponível para download' });
+    }
+    
+    const cloudinaryUrl = pontuacaoData.comprovanteUrl;
+    console.log('🔗 Cloudinary URL:', cloudinaryUrl);
+    
+    // Fazer download do PDF do Cloudinary
+    const pdfResponse = await fetch(cloudinaryUrl);
+    
+    if (!pdfResponse.ok) {
+      console.error('❌ Erro ao baixar do Cloudinary:', pdfResponse.status);
+      throw new Error(`Erro ao baixar PDF do Cloudinary: ${pdfResponse.status}`);
+    }
+    
+    // Obter o buffer do PDF
+    const pdfBuffer = await pdfResponse.buffer();
+    
+    // Verificar se é um PDF válido
+    const contentType = pdfResponse.headers.get('content-type');
+    if (!contentType || !contentType.includes('pdf')) {
+      console.warn('⚠️ O conteúdo não é um PDF, tipo:', contentType);
+      // Mesmo assim tentamos enviar como PDF
+    }
+    
+    // Configurar headers para download
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="boleto-${pontuacaoId}.pdf"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    res.setHeader('Cache-Control', 'no-cache');
+    
+    console.log('✅ Download via backend concluído. Tamanho:', pdfBuffer.length, 'bytes');
+    
+    // Enviar o PDF
+    res.send(pdfBuffer);
+    
+  } catch (error) {
+    console.error('❌ Erro no download via backend:', error);
+    res.status(500).json({
+      error: 'Erro ao baixar PDF: ' + error.message
+    });
+  }
+});
+
+// =============================================
+// ROTA: DOWNLOAD DIRETO DO PDF (ALTERNATIVA)
+// =============================================
+app.get('/api/cloudinary/download-pdf', authenticateFirebase, async (req, res) => {
+  try {
+    const { publicId, fileName = 'boleto.pdf' } = req.query;
+    
+    if (!publicId) {
+      return res.status(400).json({
+        error: 'publicId é obrigatório'
+      });
+    }
+
+    console.log('⬇️ Iniciando download direto do PDF:', publicId);
+    
+    // URL de download direto do Cloudinary com parâmetros para forçar download
+    const downloadUrl = `https://res.cloudinary.com/dno43pc3o/raw/upload/fl_attachment:${fileName}/${publicId}`;
+    
+    console.log('🔗 URL de download:', downloadUrl);
+    
+    // Fazer o download do PDF do Cloudinary
+    const response = await fetch(downloadUrl);
+    
+    if (!response.ok) {
+      throw new Error(`Erro ao baixar PDF do Cloudinary: ${response.status}`);
+    }
+    
+    // Obter o buffer do PDF
+    const pdfBuffer = await response.buffer();
+    
+    // Configurar headers para forçar download
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    res.setHeader('Cache-Control', 'no-cache');
+    
+    console.log('✅ PDF pronto para download:', {
+      tamanho: pdfBuffer.length,
+      fileName: fileName
+    });
+    
+    // Enviar o PDF
+    res.send(pdfBuffer);
+    
+  } catch (error) {
+    console.error('❌ Erro no download do PDF:', error);
+    res.status(500).json({
+      error: 'Erro ao baixar PDF: ' + error.message
+    });
+  }
+});
+
+// =============================================
+// ROTA: GERAR URL DE DOWNLOAD (ALTERNATIVA)
+// =============================================
+app.get('/api/cloudinary/download-url', authenticateFirebase, async (req, res) => {
+  try {
+    const { publicId, fileName = 'boleto.pdf' } = req.query;
+    
+    if (!publicId) {
+      return res.status(400).json({
+        error: 'publicId é obrigatório'
+      });
+    }
+
+    // Gerar URL de download direto do Cloudinary
+    const downloadUrl = `https://res.cloudinary.com/dno43pc3o/raw/upload/fl_attachment:${fileName}/${publicId}`;
+    
+    console.log('🔗 Gerando URL de download:', downloadUrl);
+    
+    res.json({
+      success: true,
+      downloadUrl: downloadUrl,
+      fileName: fileName,
+      message: 'URL de download gerada com sucesso'
+    });
+    
+  } catch (error) {
+    console.error('❌ Erro ao gerar URL de download:', error);
+    res.status(500).json({
+      error: 'Erro ao gerar URL de download: ' + error.message
+    });
+  }
+});
+
+// =============================================
 // FUNÇÃO: BUSCAR CLIENT NUMBER
 // =============================================
 async function buscarClientNumber(lojistaId) {
