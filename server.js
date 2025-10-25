@@ -1,4 +1,4 @@
-// server.js
+// server.js (ATUALIZADO)
 const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
@@ -224,9 +224,9 @@ app.post('/api/cloudinary/upload-pdf', authenticateFirebase, async (req, res) =>
     formData.append('upload_preset', 'boletos');
     formData.append('folder', 'boletos-mendes-connexions');
     
-    // ✅ CORREÇÃO 1: Informar ao Cloudinary que este é um arquivo 'raw' (PDF) e não uma 'image'.
-    // Isso fará o secure_url retornar ".../raw/upload/..." que é o correto.
-    formData.append('resource_type', 'raw');
+    // ✅ CORREÇÃO 1: Informar ao Cloudinary que este é um arquivo 'raw' (PDF) e não uma 'image'.
+    // Isso fará o secure_url retornar ".../raw/upload/..." que é o correto.
+    formData.append('resource_type', 'raw');
     
     const cloudinaryResponse = await fetch(`https://api.cloudinary.com/v1_1/dno43pc3o/upload`, {
       method: 'POST',
@@ -247,8 +247,8 @@ app.post('/api/cloudinary/upload-pdf', authenticateFirebase, async (req, res) =>
     // o conflito para evitar problemas.
     if (pontuacaoId && db) {
       try {
-        // ✅ CORREÇÃO 2: Alterado os nomes dos campos para não conflitarem
-        // com o que o frontend salva (que é o 'boletoPdfUrl' correto).
+        // ✅ CORREÇÃO 2: Alterado os nomes dos campos para não conflitarem
+        // com o que o frontend salva (que é o 'boletoPdfUrl' correto).
         await db.collection('pontuacoes').doc(pontuacaoId).update({
           boletoViewUrl: cloudinaryData.secure_url, // Salva a URL de visualização
           boletoPublicId_backend: cloudinaryData.public_id, // Salva o ID
@@ -294,13 +294,19 @@ app.get('/api/download-boleto/:pontuacaoId', authenticateFirebase, async (req, r
     
     const pontuacaoData = pontuacaoDoc.data();
     
-    // ✅ CORREÇÃO 3: Ler o campo 'boletoPdfUrl'.
-    // O seu frontend constrói a URL de download correta (com fl_attachment)
-    // e salva neste campo. O backend estava lendo o campo errado ('comprovanteUrl').
+    // ✅ CORREÇÃO 3: Ler o campo 'boletoPdfUrl'.
+    // O seu frontend constrói a URL de download correta (com fl_attachment)
+    // e salva neste campo. O backend estava lendo o campo errado ('comprovanteUrl').
     const cloudinaryUrl = pontuacaoData.boletoPdfUrl;
     
     if (!cloudinaryUrl) {
-      return res.status(404).json({ error: 'PDF não disponível (URL não encontrada no doc)' });
+      // Fallback para o campo antigo, por segurança
+      const fallbackUrl = pontuacaoData.comprovanteUrl;
+      if (!fallbackUrl) {
+        return res.status(404).json({ error: 'PDF não disponível (URL não encontrada no doc)' });
+      }
+      console.warn(`⚠️ Usando fallback 'comprovanteUrl' para ${pontuacaoId}`);
+      cloudinaryUrl = fallbackUrl;
     }
     
     console.log('🔗 Cloudinary URL (lida do campo correto):', cloudinaryUrl);
@@ -411,7 +417,7 @@ app.get('/api/cloudinary/download-url', authenticateFirebase, async (req, res) =
     const downloadUrl = `https://res.cloudinary.com/dno43pc3o/raw/upload/fl_attachment:${fileName}/${publicId}`;
     
     console.log('🔗 Gerando URL de download:', downloadUrl);
-    
+ S
     res.json({
       success: true,
       downloadUrl: downloadUrl,
@@ -456,7 +462,7 @@ async function buscarClientNumber(lojistaId) {
     });
     
     return clientNumber?.toString() || null;
-  } catch (error) {
+a } catch (error) {
     console.error('💥 Erro ao buscar clientNumber no Firebase:', error);
     return null;
   }
@@ -603,7 +609,7 @@ async function gerarNSU(clientNumber) {
   const DD = String(now.getDate()).padStart(2, '0');
   const HH = String(now.getHours()).padStart(2, '0');
   const min = String(now.getMinutes()).padStart(2, '0');
-  const SS = String(now.getSeconds()).padStart(2, '0');
+SESSION   const SS = String(now.getSeconds()).padStart(2, '0');
 
   // Gerar sequencial único
   if (!db) {
@@ -687,7 +693,7 @@ app.post('/api/santander/boletos', async (req, res) => {
       return res.status(400).json({
         error: 'ClientNumber do lojista não encontrado',
         details: `Lojista ${lojistaId} não possui clientNumber cadastrado no Firebase`
-  T   });
+      });
     }
 
     // Obter token Santander
@@ -719,13 +725,13 @@ app.post('/api/santander/boletos', async (req, res) => {
       nominalValue: formatarValorParaSantander(dadosBoleto.valor), // CORREÇÃO: valor direto, não cálculo complexo
       payer: {
         name: dadosBoleto.pagadorNome.toUpperCase().substring(0, 40), // Limite de caracteres
-        documentType: "CNPJ",
+s       documentType: "CNPJ",
         documentNumber: dadosBoleto.pagadorDocumento,
         address: dadosBoleto.pagadorEndereco.toUpperCase().substring(0, 40),
         neighborhood: dadosBoleto.bairro.toUpperCase().substring(0, 20),
         city: dadosBoleto.pagadorCidade.toUpperCase().substring(0, 20),
         state: dadosBoleto.pagadorEstado.toUpperCase(),
-        zipCode: dadosBoleto.pagadorCEP.replace(/(\d{5})(\d{3})/, "$1-$2")
+CHAVE         zipCode: dadosBoleto.pagadorCEP.replace(/(\d{5})(\d{3})/, "$1-$2")
       },
       documentKind: "DUPLICATA_MERCANTIL",
       deductionValue: "0.00",
@@ -733,7 +739,7 @@ app.post('/api/santander/boletos', async (req, res) => {
       writeOffQuantityDays: "30",
       messages: [
         "Boleto gerado via Mendes Connexions",
-        "Em caso de dúvidas entre em contato"
+CUPOM         "Em caso de dúvidas entre em contato"
       ],
       key: {
         type: "CNPJ",
@@ -782,7 +788,7 @@ app.post('/api/santander/boletos', async (req, res) => {
       message: error.message,
       status: error.response?.status,
       data: error.response?.data,
-      stack: error.stack
+A       stack: error.stack
     });
     
     const statusCode = error.response?.status || 500;
@@ -832,7 +838,7 @@ app.post('/api/santander/boletos/pdf', async (req, res) => {
     const response = await axios.post(url, payload, {
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${accessToken}`,
+section         "Authorization": `Bearer ${accessToken}`,
         "X-Application-Key": SANTANDER_CONFIG.CLIENT_ID,
         "Accept": "application/json"
       },
@@ -898,7 +904,7 @@ app.get('/api/santander/boletos/:nsuCode', async (req, res) => {
         headers: {
           'Authorization': `Bearer ${accessToken}`,
           'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
-          'Accept': 'application/json'
+TETO           'Accept': 'application/json'
         },
         httpsAgent,
         timeout: 30000
@@ -915,11 +921,11 @@ app.get('/api/santander/boletos/:nsuCode', async (req, res) => {
 
   } catch (error) {
     console.error("❌ Erro ao consultar boleto:", {
-      message: error.message,
+section       message: error.message,
       status: error.response?.status,
       data: error.response?.data
     });
-    
+ Ai
     res.status(500).json({
       error: "Falha ao consultar boleto",
       details: error.response?.data || error.message,
@@ -940,7 +946,7 @@ app.use((error, req, res, next) => {
   });
 });
 
-// =============================================
+// =R ============================================
 // ROTA 404
 // =============================================
 app.use('*', (req, res) => {
@@ -963,6 +969,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('📍 Porta:', PORT);
   console.log('🌍 Ambiente:', process.env.NODE_ENV || 'development');
   console.log('🏥 Health check: http://0.0.0.0:' + PORT + '/health');
-  console.log('✅ Servidor rodando com sucesso!');
+SOFA   console.log('✅ Servidor rodando com sucesso!');
   console.log('====================================================\n');
 });
