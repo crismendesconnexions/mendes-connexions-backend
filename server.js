@@ -1,887 +1,1025 @@
-<script>
-   document.addEventListener('DOMContentLoaded', function() {
-     // URL da API backend
-     const API_BASE_URL = 'https://mendes-connexions-backend.onrender.com';
+// server.js
+const express = require('express');
+const cors = require('cors');
+const admin = require('firebase-admin');
+const axios = require('axios');
+const helmet = require('helmet');
+const https = require('https');
 
-     // Variável para armazenar dados do lojista
-     let lojistaData = {};
-     let lojistaId = '';
-     let profissionaisAtivos = [];
-     let vendedoresAtivos = [];
-     let currentBoletoData = null; // Guarda dados do último boleto gerado com sucesso
-     let currentQrCodeData = null; // Guarda dados do QR Code para cópia
+const app = express();
 
-     // Elementos da DOM
-     const menuToggle = document.getElementById('menu-toggle');
-     const sidebar = document.getElementById('sidebar');
-     const sidebarUserName = document.getElementById('sidebar-user-name');
-     const sidebarUserAvatar = document.getElementById('sidebar-user-avatar');
-     const logoutBtn = document.getElementById('sidebar-logout-btn');
-     const qrCodeModal = document.getElementById('qrCodeModal');
-     const copyQrCodeBtn = document.getElementById('copyQrCode');
-     const closeModalBtn = document.getElementById('closeModal');
+// =============================================
+// CONFIGURAÇÃO DE SEGURANÇA
+// =============================================
+app.use(helmet({
+contentSecurityPolicy: false,
+crossOriginEmbedderPolicy: false,
+crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
+app.disable('x-powered-by');
 
-     // --- Lógica de Logout ---
-     if (logoutBtn) {
-       logoutBtn.addEventListener('click', function(e) {
-         e.preventDefault();
-         if (confirm('Tem certeza que deseja sair?')) {
-           auth.signOut().then(function() {
-             window.location.href = 'dashboard.html'; // Redireciona para página de login/dashboard
-           }).catch(function(error) {
-             console.error('Erro ao fazer logout:', error);
-             alert('Erro ao sair. Tente novamente.');
-           });
-         }
-       });
-     } else {
-       console.warn('Botão de logout não encontrado na inicialização');
-     }
+// =============================================
+// CONFIGURAÇÃO CORS ATUALIZADA
+// =============================================
+const corsOptions = {
+origin: [
+'https://mendesconnexions.com.br',
+'https://www.mendesconnexions.com.br',
+'http://localhost:3000',
+'http://localhost:8080'
+],
+credentials: true,
+methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+optionsSuccessStatus: 200
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
-     // --- Lógica do Modal QR Code ---
-     if (closeModalBtn) {
-       closeModalBtn.addEventListener('click', function() {
-         qrCodeModal.classList.remove('active');
-       });
-     }
-     if (copyQrCodeBtn) {
-       copyQrCodeBtn.addEventListener('click', copiarCodigoPix);
-     }
-     qrCodeModal.addEventListener('click', function(e) { // Fechar ao clicar fora
-       if (e.target === qrCodeModal) {
-         qrCodeModal.classList.remove('active');
-       }
-     });
+// =============================================
+// MIDDLEWARES GLOBAIS
+// =============================================
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
 
-     // --- Teste Inicial de Conexão com Backend ---
-     console.log('=== INICIANDO VERIFICAÇÃO DE CONEXÃO ===');
-     console.log('URL do Backend:', API_BASE_URL);
-     fetch(`${API_BASE_URL}/health`)
-       .then(response => {
-         console.log('Health Check Status:', response.status);
-         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-         return response.json();
-       })
-       .then(data => console.log('Health Check Response:', data))
-       .catch(error => console.error('Erro no Health Check básico:', error));
+// Middleware de log para debug
+app.use((req, res, next) => {
+console.log(`📥 ${req.method} ${req.path}`, {
+body: req.body,
+headers: req.headers
+});
+next();
+});
 
-     // --- Lógica do Menu Mobile ---
-     if (menuToggle && sidebar) {
-        menuToggle.addEventListener('click', () => {
-            sidebar.classList.toggle('active');
-        });
-        document.addEventListener('click', (e) => { // Fechar ao clicar fora
-            if (window.innerWidth <= 768 &&
-                sidebar.classList.contains('active') &&
-                !sidebar.contains(e.target) &&
-                !menuToggle.contains(e.target)) {
-            sidebar.classList.remove('active');
-            }
-        });
-     }
+// =============================================
+// MIDDLEWARE DE AUTENTICAÇÃO FIREBASE
+// =============================================
+const authenticateFirebase = async (req, res, next) => {
+try {
+const authHeader = req.headers.authorization;
 
+if (!authHeader || !authHeader.startsWith('Bearer ')) {
+return res.status(401).json({
+error: 'Token de autenticação não fornecido',
+details: 'Formato esperado: Bearer <token>'
+});
+}
 
-     // --- Inicialização de Máscaras e Data ---
-     try {
-        $('#valor-compra').mask('000.000.000.000.000,00', {reverse: true});
-     } catch (e) {
-         console.warn("jQuery Mask não carregado ou falhou:", e);
-     }
-     const dataReferenciaInput = document.getElementById('data-referencia');
-     if (dataReferenciaInput) {
-        dataReferenciaInput.valueAsDate = new Date(); // Define data atual
-     }
+const token = authHeader.split('Bearer ')[1];
 
+if (!token) {
+return res.status(401).json({
+error: 'Token inválido',
+details: 'Token não encontrado no header Authorization'
+});
+}
 
-     // --- Status de Integração Inicial ---
-     const statusDiv = document.getElementById('integration-status');
-     const messageSpan = document.getElementById('integration-message');
-     if (statusDiv && messageSpan) {
-        statusDiv.className = 'integration-status integration-warning';
-        messageSpan.innerHTML = '<i class="fas fa-sync-alt fa-spin mr-2"></i>Verificando conexão...';
-        statusDiv.style.display = 'block';
-     }
+// Verificar se o Firebase Admin foi inicializado
+if (!admin.apps.length) {
+return res.status(500).json({
+error: 'Serviço de autenticação indisponível',
+details: 'Firebase Admin não inicializado'
+});
+}
 
+// Verificar token com Firebase Admin
+const decodedToken = await admin.auth().verifyIdToken(token);
+req.user = decodedToken;
 
-     // --- Configuração dos Selects Personalizados ---
-     function configurarSelectPersonalizado() {
-        ['profissional', 'vendedor'].forEach(tipo => {
-            const trigger = document.getElementById(`${tipo}-select-trigger`);
-            const options = document.getElementById(`${tipo}-select-options`);
-            const search = document.getElementById(`search-${tipo}`);
+console.log('✅ Usuário autenticado:', {
+uid: decodedToken.uid,
+email: decodedToken.email
+});
 
-            if (trigger && options && search) {
-                trigger.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    // Fecha o outro select se estiver aberto
-                    const outroTipo = tipo === 'profissional' ? 'vendedor' : 'profissional';
-                    document.getElementById(`${outroTipo}-select-options`)?.classList.remove('active');
-                    // Abre/fecha o select atual
-                    options.classList.toggle('active');
-                    if (options.classList.contains('active')) {
-                        search.focus();
-                        search.value = ''; // Limpa busca ao abrir
-                        // Força a re-renderização inicial (caso a busca anterior tenha filtrado)
-                        const event = new Event('input', { bubbles: true, cancelable: true });
-                        search.dispatchEvent(event);
-                    }
-                });
-                options.addEventListener('click', (e) => e.stopPropagation()); // Impede fechar ao clicar dentro
-            }
-        });
-         // Fechar selects ao clicar fora
-        document.addEventListener('click', (e) => {
-            document.getElementById('profissional-select-options')?.classList.remove('active');
-            document.getElementById('vendedor-select-options')?.classList.remove('active');
-        });
-     }
+next();
+} catch (error) {
+console.error('❌ Erro na autenticação Firebase:', error);
 
-     // --- Verificação de Autenticação e Carga Inicial ---
-     auth.onAuthStateChanged(async function(user) {
-       if (user) {
-         lojistaId = user.uid;
-         console.log('Usuário autenticado:', lojistaId);
-         try {
-             await Promise.all([
-                 carregarDadosLojista(lojistaId),
-                 carregarProfissionaisAtivos(), // Carrega primeiro para usar no histórico
-                 carregarVendedoresAtivos()     // Carrega primeiro para usar no histórico
-             ]);
-             await carregarHistoricoPontuacoes(); // Carrega histórico DEPOIS de ter prof/vend
-             configurarSelectPersonalizado();
-             await testarConexaoBackend(); // Testa conexão após carregar dados
-             if (statusDiv && messageSpan) {
-                statusDiv.className = 'integration-status integration-success';
-                messageSpan.innerHTML = '<i class="fas fa-check-circle mr-2"></i>Conectado com sucesso';
-             }
-         } catch (error) {
-             console.error('Erro durante a carga inicial:', error);
-             if (statusDiv && messageSpan) {
-                statusDiv.className = 'integration-status integration-error';
-                messageSpan.innerHTML = '<i class="fas fa-times-circle mr-2"></i>Erro na inicialização';
-             }
-         }
+return res.status(401).json({
+error: 'Token inválido ou expirado',
+details: error.message
+});
+}
+};
 
-       } else {
-         console.log('Usuário não autenticado, redirecionando...');
-         window.location.href = 'dashboard.html'; // Redireciona para login
-       }
-     });
+// =============================================
+// HEALTH CHECK
+// =============================================
+app.get('/health', (req, res) => {
+res.status(200).json({
+status: 'ok',
+message: 'Backend online e funcionando',
+timestamp: new Date().toISOString(),
+service: 'Mendes Connexions Backend',
+environment: process.env.NODE_ENV || 'development',
+port: process.env.PORT || 3001,
+uptime: `${process.uptime().toFixed(2)} segundos`,
+firebase: !!admin.apps.length
+});
+});
 
-     // --- Funções de Carga de Dados (Lojista, Profissionais, Vendedores) ---
-     async function carregarDadosLojista(userId) {
-       try {
-         const lojistaDoc = await db.collection('lojistas').doc(userId).get();
-         if (lojistaDoc.exists) {
-           lojistaData = lojistaDoc.data();
-           console.log("Dados do lojista carregados:", lojistaData);
-           if (sidebarUserName) sidebarUserName.textContent = lojistaData.nomeFantasia || lojistaData.nome || 'Lojista';
-           if (sidebarUserAvatar) {
-             sidebarUserAvatar.innerHTML = lojistaData.logoURL
-               ? `<img src="${lojistaData.logoURL}" alt="Logo">`
-               : '<i class="fas fa-store"></i>';
-           }
-         } else {
-           console.error('Dados do lojista não encontrados para ID:', userId);
-           // Tratar caso: talvez deslogar ou mostrar mensagem
-         }
-       } catch (error) {
-         console.error('Erro ao carregar dados do lojista:', error);
-         // Mostrar mensagem de erro para o usuário
-       }
-     }
+// =============================================
+// INICIALIZAÇÃO FIREBASE ADMIN
+// =============================================
+let serviceAccount;
+let db = null;
 
-      async function carregarProfissionaisAtivos() {
-        try {
-            const snapshot = await db.collection('profissionais')
-                                    .where('status', '==', 'aprovado') // Apenas aprovados
-                                    .orderBy('nome') // Ordenar por nome
-                                    .get();
-            profissionaisAtivos = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            console.log(`Carregados ${profissionaisAtivos.length} profissionais ativos.`);
-            const optionsContainer = document.getElementById('profissional-options-list');
-            if (optionsContainer) {
-                optionsContainer.innerHTML = ''; // Limpa antes de adicionar
-                if (profissionaisAtivos.length === 0) {
-                    optionsContainer.innerHTML = '<div class="select-option text-gray-500">Nenhum profissional aprovado encontrado</div>';
-                } else {
-                    profissionaisAtivos.forEach(p => optionsContainer.appendChild(criarOpcaoSelectPersonalizado(p, 'profissional')));
-                }
-                configurarBuscaSelectPersonalizado('search-profissional', 'profissional-options-list', profissionaisAtivos, 'profissional');
-            }
-        } catch (error) {
-            console.error('Erro ao carregar profissionais ativos:', error);
-            const optionsContainer = document.getElementById('profissional-options-list');
-            if(optionsContainer) optionsContainer.innerHTML = '<div class="select-option text-red-500">Erro ao carregar</div>';
-        }
+try {
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+} else {
+console.error('❌ FIREBASE_SERVICE_ACCOUNT não encontrado nas variáveis de ambiente');
+}
+} catch (err) {
+console.error('❌ Erro ao parsear FIREBASE_SERVICE_ACCOUNT:', err.message);
+}
+
+if (serviceAccount) {
+try {
+admin.initializeApp({
+credential: admin.credential.cert(serviceAccount),
+databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`,
+storageBucket: process.env.FIREBASE_STORAGE_BUCKET || `${serviceAccount.project_id}.appspot.com`
+});
+console.log('✅ Firebase Admin inicializado com sucesso');
+db = admin.firestore();
+} catch (error) {
+console.error('❌ Erro crítico ao inicializar Firebase Admin:', error);
+}
+} else {
+console.error('❌ Firebase Admin não inicializado - serviceAccount indisponível');
+}
+
+// =============================================
+// CONFIGURAÇÃO SANTANDER
+// =============================================
+const SANTANDER_CONFIG = {
+CLIENT_ID: process.env.SANTANDER_CLIENT_ID,
+CLIENT_SECRET: process.env.SANTANDER_CLIENT_SECRET,
+COVENANT_CODE: parseInt(process.env.SANTANDER_COVENANT_CODE || "178622"),
+PARTICIPANT_CODE: "00000001", // CORREÇÃO: Valor padrão correto
+DICT_KEY: process.env.SANTANDER_DICT_KEY || "09199193000126"
+};
+
+// =============================================
+// AGENTE HTTPS SANTANDER
+// =============================================
+function createHttpsAgent() {
+try {
+const certBase64 = process.env.SANTANDER_CERTIFICATE_CRT_B64;
+const keyBase64 = process.env.SANTANDER_PRIVATE_KEY_B64;
+
+if (!certBase64 || !keyBase64) {
+console.error('❌ Certificado ou chave privada não encontrados');
+return null;
+}
+
+const cert = Buffer.from(certBase64, 'base64').toString('utf-8');
+const key = Buffer.from(keyBase64, 'base64').toString('utf-8');
+
+return new https.Agent({
+cert: cert,
+key: key,
+rejectUnauthorized: true,
+keepAlive: true
+});
+} catch (error) {
+console.error('❌ Erro ao criar agente HTTPS:', error.message);
+return null;
+}
+}
+
+// =============================================
+// ROTA: UPLOAD PARA CLOUDINARY
+// =============================================
+app.post('/api/cloudinary/upload-pdf', authenticateFirebase, async (req, res) => {
+try {
+const { pdfUrl, fileName, pontuacaoId } = req.body;
+
+console.log('☁️ Iniciando upload para Cloudinary via backend...');
+console.log('📄 Dados do upload:', { pdfUrl, fileName, pontuacaoId });
+
+// Validar dados obrigatórios
+if (!pdfUrl || !fileName) {
+return res.status(400).json({
+error: 'Dados incompletos',
+details: 'pdfUrl e fileName são obrigatórios'
+});
+}
+
+// Baixar o PDF
+console.log('⬇️ Baixando PDF da URL...');
+const pdfResponse = await fetch(pdfUrl);
+if (!pdfResponse.ok) {
+throw new Error(`Erro ao baixar PDF: ${pdfResponse.status}`);
+}
+
+const pdfBlob = await pdfResponse.blob();
+console.log(`✅ PDF baixado com sucesso. Tamanho: ${pdfBlob.size} bytes`);
+
+// Fazer upload para Cloudinary
+console.log('⬆️ Iniciando upload para Cloudinary...');
+const formData = new FormData();
+formData.append('file', pdfBlob, fileName);
+formData.append('upload_preset', 'boletos');
+formData.append('folder', 'boletos-mendes-connexions');
+
+const cloudinaryResponse = await fetch(`https://api.cloudinary.com/v1_1/dno43pc3o/upload`, {
+method: 'POST',
+body: formData
+});
+
+if (!cloudinaryResponse.ok) {
+const errorData = await cloudinaryResponse.json();
+throw new Error(errorData.error?.message || 'Erro ao fazer upload para Cloudinary');
+}
+
+const cloudinaryData = await cloudinaryResponse.json();
+
+console.log('✅ Upload para Cloudinary realizado com sucesso:', cloudinaryData.secure_url);
+
+// Se temos um pontuacaoId, atualizar no Firebase
+if (pontuacaoId && db) {
+try {
+await db.collection('pontuacoes').doc(pontuacaoId).update({
+comprovanteUrl: cloudinaryData.secure_url,
+comprovantePublicId: cloudinaryData.public_id,
+comprovanteUploadedAt: new Date().toISOString()
+});
+console.log('✅ URL do comprovante salva no Firebase para pontuacaoId:', pontuacaoId);
+} catch (firebaseError) {
+console.error('⚠️ Erro ao salvar no Firebase, mas upload foi bem sucedido:', firebaseError);
+// Não falha a requisição se só o Firebase der erro
+}
+}
+
+res.json({
+success: true,
+cloudinaryUrl: cloudinaryData.secure_url,
+publicId: cloudinaryData.public_id,
+message: 'Upload realizado com sucesso'
+});
+
+} catch (error) {
+console.error('❌ Erro no upload para Cloudinary:', error);
+res.status(500).json({
+error: 'Erro ao fazer upload para Cloudinary: ' + error.message
+});
+}
+});
+
+// =============================================
+// ROTA: DOWNLOAD VIA BACKEND (SOLUÇÃO DEFINITIVA)
+// =============================================
+app.get('/api/download-boleto/:pontuacaoId', authenticateFirebase, async (req, res) => {
+  try {
+    const { pontuacaoId } = req.params;
+    
+    console.log('📥 Iniciando download via backend para:', pontuacaoId);
+    
+    // Buscar dados da pontuação
+    const pontuacaoDoc = await db.collection('pontuacoes').doc(pontuacaoId).get();
+    
+    if (!pontuacaoDoc.exists) {
+      return res.status(404).json({ error: 'Pontuação não encontrada' });
+    }
+    
+    const pontuacaoData = pontuacaoDoc.data();
+    
+    if (!pontuacaoData.comprovanteUrl) {
+      return res.status(404).json({ error: 'PDF não disponível para download' });
+    }
+    
+    const cloudinaryUrl = pontuacaoData.comprovanteUrl;
+    console.log('🔗 Cloudinary URL:', cloudinaryUrl);
+    
+    // Fazer download do PDF do Cloudinary
+    const pdfResponse = await fetch(cloudinaryUrl);
+    
+    if (!pdfResponse.ok) {
+      console.error('❌ Erro ao baixar do Cloudinary:', pdfResponse.status);
+      throw new Error(`Erro ao baixar PDF do Cloudinary: ${pdfResponse.status}`);
+    }
+    
+    // Obter o buffer do PDF
+    const pdfBuffer = await pdfResponse.buffer();
+    
+    // Verificar se é um PDF válido
+    const contentType = pdfResponse.headers.get('content-type');
+    if (!contentType || !contentType.includes('pdf')) {
+      console.warn('⚠️ O conteúdo não é um PDF, tipo:', contentType);
+      // Mesmo assim tentamos enviar como PDF
+    }
+    
+    // Configurar headers para download
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="boleto-${pontuacaoId}.pdf"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    res.setHeader('Cache-Control', 'no-cache');
+    
+    console.log('✅ Download via backend concluído. Tamanho:', pdfBuffer.length, 'bytes');
+    
+    // Enviar o PDF
+    res.send(pdfBuffer);
+    
+  } catch (error) {
+    console.error('❌ Erro no download via backend:', error);
+    res.status(500).json({
+      error: 'Erro ao baixar PDF: ' + error.message
+    });
+  }
+});
+
+// =============================================
+// ROTA: DOWNLOAD DIRETO DO PDF (ALTERNATIVA)
+// =============================================
+app.get('/api/cloudinary/download-pdf', authenticateFirebase, async (req, res) => {
+  try {
+    const { publicId, fileName = 'boleto.pdf' } = req.query;
+    
+    if (!publicId) {
+      return res.status(400).json({
+        error: 'publicId é obrigatório'
+      });
+    }
+
+    console.log('⬇️ Iniciando download direto do PDF:', publicId);
+    
+    // URL de download direto do Cloudinary com parâmetros para forçar download
+    const downloadUrl = `https://res.cloudinary.com/dno43pc3o/raw/upload/fl_attachment:${fileName}/${publicId}`;
+    
+    console.log('🔗 URL de download:', downloadUrl);
+    
+    // Fazer o download do PDF do Cloudinary
+    const response = await fetch(downloadUrl);
+    
+    if (!response.ok) {
+      throw new Error(`Erro ao baixar PDF do Cloudinary: ${response.status}`);
+    }
+    
+    // Obter o buffer do PDF
+    const pdfBuffer = await response.buffer();
+    
+    // Configurar headers para forçar download
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    res.setHeader('Cache-Control', 'no-cache');
+    
+    console.log('✅ PDF pronto para download:', {
+      tamanho: pdfBuffer.length,
+      fileName: fileName
+    });
+    
+    // Enviar o PDF
+    res.send(pdfBuffer);
+    
+  } catch (error) {
+    console.error('❌ Erro no download do PDF:', error);
+    res.status(500).json({
+      error: 'Erro ao baixar PDF: ' + error.message
+    });
+  }
+});
+
+// =============================================
+// ROTA: GERAR URL DE DOWNLOAD (ALTERNATIVA)
+// =============================================
+app.get('/api/cloudinary/download-url', authenticateFirebase, async (req, res) => {
+  try {
+    const { publicId, fileName = 'boleto.pdf' } = req.query;
+    
+    if (!publicId) {
+      return res.status(400).json({
+        error: 'publicId é obrigatório'
+      });
+    }
+
+    // Gerar URL de download direto do Cloudinary
+    const downloadUrl = `https://res.cloudinary.com/dno43pc3o/raw/upload/fl_attachment:${fileName}/${publicId}`;
+    
+    console.log('🔗 Gerando URL de download:', downloadUrl);
+    
+    res.json({
+      success: true,
+      downloadUrl: downloadUrl,
+      fileName: fileName,
+      message: 'URL de download gerada com sucesso'
+    });
+    
+  } catch (error) {
+    console.error('❌ Erro ao gerar URL de download:', error);
+    res.status(500).json({
+      error: 'Erro ao gerar URL de download: ' + error.message
+    });
+  }
+});
+
+// =============================================
+// FUNÇÃO: BUSCAR CLIENT NUMBER
+// =============================================
+async function buscarClientNumber(lojistaId) {
+if (!db) {
+console.error('❌ Firestore não inicializado');
+return null;
+}
+
+try {
+console.log('🔍 Buscando clientNumber para lojista:', lojistaId);
+const lojistaDoc = await db.collection('lojistas').doc(lojistaId).get();
+
+if (!lojistaDoc.exists) {
+console.log('❌ Lojista não encontrado');
+return null;
+}
+
+const data = lojistaDoc.data();
+const clientNumber = data.clientNumber || data.idNumber;
+
+console.log('📋 Dados do lojista encontrado:', {
+exists: lojistaDoc.exists,
+clientNumber,
+nome: data.nomeFantasia || data.nome,
+cnpj: data.cnpj
+});
+
+return clientNumber?.toString() || null;
+} catch (error) {
+console.error('💥 Erro ao buscar clientNumber no Firebase:', error);
+return null;
+}
+}
+
+// =============================================
+// FUNÇÃO: OBTER TOKEN SANTANDER
+// =============================================
+async function obterTokenSantander() {
+console.log("\n=== [1] Solicitando TOKEN Santander ===");
+
+const formData = new URLSearchParams({
+client_id: SANTANDER_CONFIG.CLIENT_ID,
+client_secret: SANTANDER_CONFIG.CLIENT_SECRET,
+grant_type: 'client_credentials',
+scope: 'collection_bill_management'
+});
+
+try {
+const httpsAgent = createHttpsAgent();
+if (!httpsAgent) throw new Error('Agente HTTPS não disponível');
+
+const response = await axios.post(
+'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
+formData,
+{
+headers: {
+'Content-Type': 'application/x-www-form-urlencoded',
+'Accept': 'application/json'
+},
+httpsAgent,
+timeout: 30000
+}
+);
+
+console.log("✅ Token recebido com sucesso");
+return response.data.access_token;
+} catch (err) {
+console.error("❌ Erro ao obter token Santander:", {
+status: err.response?.status,
+data: err.response?.data,
+message: err.message
+});
+throw err;
+}
+}
+
+// =============================================
+// FUNÇÃO: CRIAR WORKSPACE
+// =============================================
+async function criarWorkspace(accessToken) {
+console.log("\n=== [2] Criando WORKSPACE ===");
+
+const payload = {
+type: "BILLING",
+description: "Workspace de Cobrança",
+covenants: [
+{ code: SANTANDER_CONFIG.COVENANT_CODE }
+]
+};
+
+console.log("➡️ Payload Workspace:", JSON.stringify(payload, null, 2));
+
+try {
+const httpsAgent = createHttpsAgent();
+if (!httpsAgent) throw new Error('Agente HTTPS não disponível');
+
+const response = await axios.post(
+'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
+payload,
+{
+headers: {
+'Content-Type': 'application/json',
+'Authorization': `Bearer ${accessToken}`,
+'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+'Accept': 'application/json'
+},
+httpsAgent,
+timeout: 30000
+}
+);
+
+console.log("✅ Workspace criada:", response.data.id);
+return response.data.id;
+} catch (error) {
+console.error("❌ Erro ao criar workspace:", {
+status: error.response?.status,
+data: error.response?.data,
+message: error.message
+});
+throw error;
+}
+}
+
+// =============================================
+// ✅ INÍCIO DA CORREÇÃO: FUNÇÕES AUXILIARES DE DATA (CORRIGIDAS PARA FUSO HORÁRIO)
+// =============================================
+
+/**
+ * NOVA FUNÇÃO: Formata datas para YYYY-MM-DD no fuso de São Paulo.
+ * Esta função deve ser definida ANTES de ser usada.
+ */
+function formatarDataParaSantander(date) {
+  const options = {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    timeZone: 'America/Sao_Paulo' // Força o fuso horário do Brasil
+  };
+  
+  // Formata para "DD/MM/YYYY"
+  const dataFormatada = new Intl.DateTimeFormat('pt-BR', options).format(date);
+  
+  // Inverte para "YYYY-MM-DD"
+  const [dia, mes, ano] = dataFormatada.split('/');
+  return `${ano}-${mes}-${dia}`;
+}
+
+function calcularQuintoDiaUtilProximoMes() {
+  // CORREÇÃO: Pega a data de 'hoje' no fuso de SP
+  // Usamos new Date() pois a formatarDataParaSantander vai converter para o fuso correto.
+  const hoje = new Date();
+  const hojeStr = formatarDataParaSantander(hoje);
+  const [anoHoje, mesHoje, diaHoje] = hojeStr.split('-').map(Number);
+
+  let ano = anoHoje;
+  let mes = mesHoje; // mesHoje já é 1-12
+
+  if (mes === 12) {
+    mes = 1; // Vai para Janeiro
+    ano += 1;
+  } else {
+    mes += 1; // Próximo mês
+  }
+
+  // JS usa mês 0-11, então subtraímos 1
+  // Começa no dia 1 do próximo mês
+  const data = new Date(Date.UTC(ano, mes - 1, 1)); // Usamos UTC para evitar problemas de fuso local do servidor
+  
+  let diasUteis = 0;
+  
+  // Loop para encontrar o 5º dia útil
+  while (diasUteis < 5) {
+    // Ajusta para o fuso de SP para checar o dia da semana corretamente
+    const dataSP = new Date(data.toLocaleString("en-US", {timeZone: "America/Sao_Paulo"}));
+    const diaSemana = dataSP.getUTCDay(); // getUTCDay() porque a data agora é efetivamente de SP
+
+    // 0 = Domingo, 6 = Sábado
+    if (diaSemana !== 0 && diaSemana !== 6) {
+        diasUteis++;
     }
-
-     async function carregarVendedoresAtivos() {
-         if (!lojistaId) return; // Precisa do ID do lojista
-         try {
-             const snapshot = await db.collection('vendedores')
-                                     .where('lojistaId', '==', lojistaId)
-                                     .orderBy('nome') // Ordenar por nome
-                                     .get();
-             vendedoresAtivos = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-             console.log(`Carregados ${vendedoresAtivos.length} vendedores para o lojista ${lojistaId}.`);
-             const optionsContainer = document.getElementById('vendedor-options-list');
-             if (optionsContainer) {
-                 optionsContainer.innerHTML = ''; // Limpa antes de adicionar
-                 if (vendedoresAtivos.length === 0) {
-                     optionsContainer.innerHTML = '<div class="select-option text-gray-500">Nenhum vendedor cadastrado</div>';
-                 } else {
-                     vendedoresAtivos.forEach(v => optionsContainer.appendChild(criarOpcaoSelectPersonalizado(v, 'vendedor')));
-                 }
-                 configurarBuscaSelectPersonalizado('search-vendedor', 'vendedor-options-list', vendedoresAtivos, 'vendedor');
-             }
-         } catch (error) {
-             console.error(`Erro ao carregar vendedores do lojista ${lojistaId}:`, error);
-              const optionsContainer = document.getElementById('vendedor-options-list');
-             if(optionsContainer) optionsContainer.innerHTML = '<div class="select-option text-red-500">Erro ao carregar</div>';
-         }
-     }
-
-
-     // --- Funções Auxiliares (Criar Opção, Configurar Busca) ---
-     function criarOpcaoSelectPersonalizado(item, tipo) {
-       const div = document.createElement('div');
-       div.className = 'select-option';
-       div.setAttribute('data-id', item.id);
-       div.setAttribute('data-nome', item.nome); // Guarda nome para fácil acesso
-
-       let imagemHTML = '';
-       let detalhes = '';
-       let cpfFormatado = 'Não informado';
-
-       if (item.cpf) {
-           const cpfLimpo = item.cpf.toString().replace(/\D/g, '').padStart(11, '0');
-            if (cpfLimpo.length === 11) {
-              cpfFormatado = cpfLimpo.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4");
-            } else {
-              cpfFormatado = "Inválido"; // Ou apenas o número como estava
-            }
-       }
-
-
-       if (tipo === 'profissional') {
-         imagemHTML = item.fotoPerfilURL
-           ? `<img src="${item.fotoPerfilURL}" class="select-option-image" alt="${item.nome}" onerror="this.onerror=null; this.replaceWith(document.createTextNode('🖼️'))">` // Fallback se imagem quebrar
-           : `<div class="select-option-image"><i class="fas fa-user"></i></div>`;
-         detalhes = `${item.tipoProfissional || 'Profissional'} | CPF: ${cpfFormatado}`;
-       } else if (tipo === 'vendedor') {
-         imagemHTML = item.fotoURL
-           ? `<img src="${item.fotoURL}" class="select-option-image" alt="${item.nome}" onerror="this.onerror=null; this.replaceWith(document.createTextNode('🖼️'))">` // Fallback
-           : `<div class="select-option-image"><i class="fas fa-user-tie"></i></div>`;
-         detalhes = `${item.funcao || 'Vendedor'} | CPF: ${cpfFormatado}`;
-       }
-
-       div.innerHTML = `
-         ${imagemHTML}
-         <div class="select-option-info">
-           <div class="select-option-name">${item.nome || 'Nome não disponível'}</div>
-           <div class="select-option-details">${detalhes}</div>
-         </div>
-       `;
-
-       div.addEventListener('click', function() {
-         const trigger = document.getElementById(`${tipo}-select-trigger`);
-         const inputId = document.getElementById(`${tipo}-id`);
-         const optionsContainer = document.getElementById(`${tipo}-select-options`);
-
-         if (trigger) trigger.querySelector('span').textContent = this.getAttribute('data-nome');
-         if (inputId) inputId.value = this.getAttribute('data-id');
-         if (optionsContainer) optionsContainer.classList.remove('active');
-       });
-
-       return div;
-     }
-
-     function configurarBuscaSelectPersonalizado(inputId, optionsListId, items, tipo) {
-        const searchInput = document.getElementById(inputId);
-        const optionsList = document.getElementById(optionsListId);
-
-        if (!searchInput || !optionsList) return;
-
-        searchInput.addEventListener('input', function() {
-            const searchTerm = this.value.toLowerCase().trim();
-            optionsList.innerHTML = ''; // Limpa a lista
-
-            const filteredItems = items.filter(item => {
-                const nome = item.nome?.toLowerCase() || '';
-                const cpf = item.cpf?.replace(/\D/g, '') || ''; // Busca por CPF sem formatação
-                const tipoProf = tipo === 'profissional' ? (item.tipoProfissional?.toLowerCase() || '') : '';
-                const funcaoVend = tipo === 'vendedor' ? (item.funcao?.toLowerCase() || '') : '';
-
-                return nome.includes(searchTerm) ||
-                       cpf.includes(searchTerm) || // Busca no CPF limpo
-                       (tipo === 'profissional' && tipoProf.includes(searchTerm)) ||
-                       (tipo === 'vendedor' && funcaoVend.includes(searchTerm));
-            });
-
-            if (filteredItems.length === 0) {
-                optionsList.innerHTML = '<div class="select-option text-gray-500 p-4">Nenhum resultado encontrado</div>';
-            } else {
-                filteredItems.forEach(item => {
-                    optionsList.appendChild(criarOpcaoSelectPersonalizado(item, tipo));
-                });
-            }
-        });
-     }
-
-
-     // --- Funções Principais de Negócio (Registrar, Gerar PDF, Upload, Processar Completo) ---
-
-     async function registrarBoletoSantander(requestData) {
-       // (Esta função não mudou, continua chamando o backend)
-       try {
-         const user = auth.currentUser;
-         if (!user) throw new Error('Usuário não autenticado para registrar boleto');
-         const token = await user.getIdToken();
-         console.log('📤 Enviando dados para registro de boleto:', requestData);
-         const response = await fetch(`${API_BASE_URL}/api/santander/boletos`, {
-           method: 'POST',
-           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-           body: JSON.stringify(requestData)
-         });
-         console.log('📥 Status do registro:', response.status);
-         const responseData = await response.json(); // Tenta parsear JSON mesmo em erro
-         if (!response.ok) {
-           console.error('❌ Erro da API Santander (registro):', responseData);
-           throw new Error(responseData.details || responseData.error || `Erro ${response.status}`);
-         }
-         console.log('✅ Boleto registrado com sucesso:', responseData);
-         return responseData;
-       } catch (error) {
-         console.error('💥 Erro completo ao registrar boleto:', error);
-         throw error; // Re-lança para o handler principal
-       }
-     }
-
-      async function gerarPdfBoleto(digitableLine, payerDocumentNumber) {
-        // (Esta função não mudou, continua chamando o backend)
-        try {
-            const user = auth.currentUser;
-            if (!user) throw new Error('Usuário não autenticado para gerar PDF');
-            const token = await user.getIdToken();
-            console.log('📄 Solicitando link PDF do boleto:', { digitableLine, payerDocumentNumber });
-            const response = await fetch(`${API_BASE_URL}/api/santander/boletos/pdf`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                body: JSON.stringify({
-                    digitableLine: digitableLine,
-                    payerDocumentNumber: payerDocumentNumber // Backend limpa se necessário
-                })
-            });
-            console.log('📥 Status da resposta PDF:', response.status);
-            const responseData = await response.json(); // Tenta parsear mesmo em erro
-            if (!response.ok) {
-                console.error('❌ Erro da API Santander (PDF):', responseData);
-                throw new Error(responseData.details || responseData.error || `Erro ${response.status}`);
-            }
-            if (!responseData.link) {
-                console.error("Link do PDF não retornado:", responseData);
-                throw new Error('Link do PDF não retornado pelo servidor');
-            }
-            console.log('✅ Link PDF gerado:', responseData.link);
-            return responseData.link; // Retorna apenas o link temporário
-        } catch (error) {
-            console.error('💥 Erro ao gerar link PDF do boleto:', error);
-            throw error; // Re-lança
-        }
+    if (diasUteis === 5) {
+        break;
     }
-
-      // ✅ CORREÇÃO: Função uploadPdfParaCloudinary SIMPLIFICADA
-      // Pega a URL do backend e salva diretamente no Firebase.
-      async function uploadPdfParaCloudinary(pdfUrl, fileName, pontuacaoId) {
-          return new Promise(async (resolve, reject) => {
-            try {
-              console.log('☁️ Iniciando upload para Cloudinary via backend:', fileName);
-
-              const user = auth.currentUser;
-              if (!user) throw new Error('Usuário não autenticado para upload');
-              const token = await user.getIdToken();
-
-              const response = await fetch(`${API_BASE_URL}/api/cloudinary/upload-pdf`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                body: JSON.stringify({ pdfUrl, fileName, pontuacaoId })
-              });
-
-              const result = await response.json(); // Tenta parsear mesmo em erro
-
-              if (!response.ok) {
-                console.error("Erro no upload via backend:", result);
-                throw new Error(result.details || result.error || `Erro ${response.status} no upload`);
-              }
-
-              console.log('✅ Upload via backend realizado:', result);
-
-              // --- INÍCIO DA CORREÇÃO: Salvar a URL EXATA do Backend ---
-
-              // 1. Pegar a URL EXATA que o backend retornou (a que você viu no log, /image/upload/...)
-              const backendUrl = result.cloudinaryUrl;
-              const publicId = result.publicId; // Pegar o publicId também
-
-              if (!backendUrl) {
-                  throw new Error("Backend não retornou a cloudinaryUrl após upload.");
-              }
-
-              console.log("🔗 URL Recebida do Backend (será salva):", backendUrl);
-
-              // 2. ATUALIZAR O FIREBASE salvando essa URL diretamente nos campos principais
-              await db.collection('pontuacoes').doc(pontuacaoId).update({
-                boletoPdfUrl: backendUrl,      // Salva a URL do backend aqui
-                boletoDownloadUrl: backendUrl, // Salva a mesma URL aqui (botão do histórico usa este)
-                boletoViewUrl: backendUrl,     // Salva aqui também por consistência
-                boletoPublicId: publicId       // Salva o publicId retornado pelo backend
-              });
-
-              console.log('✅ URL do backend salva diretamente no Firebase');
-              resolve(backendUrl); // Retorna a URL do backend para uso imediato
-
-              // --- FIM DA CORREÇÃO ---
-
-            } catch (error) {
-              console.error('❌ Erro na função uploadPdfParaCloudinary:', error);
-              reject(error); // Re-lança para o handler principal
-            }
-          });
-        }
-
-
-      async function processarBoletoCompleto(requestData, pontuacaoRef) {
-        try {
-          console.log('🔄 Iniciando processo completo do boleto...');
-
-          // 1. Registrar boleto no Santander
-          const boletoResponse = await registrarBoletoSantander(requestData);
-          console.log('✅ Boleto registrado no Santander');
-
-          // 2. Gerar PDF do boleto (obter link temporário)
-          const digitableLine = boletoResponse.digitableLine;
-          const payerDocument = requestData.dadosBoleto.pagadorDocumento;
-          const fileName = `boleto-${pontuacaoRef.id}.pdf`; // Nome mais consistente
-
-          if (!digitableLine) {
-              throw new Error('Linha digitável não retornada pelo Santander no registro.');
-          }
-
-          const pdfUrlTemporario = await gerarPdfBoleto(digitableLine, payerDocument);
-          console.log('✅ Link temporário do PDF gerado:', pdfUrlTemporario);
-
-          // 3. Fazer upload do PDF para Cloudinary (via backend)
-          // Esta função AGORA salva a URL final (backendUrl) nos campos corretos do Firebase
-          const urlFinalCloudinary = await uploadPdfParaCloudinary(pdfUrlTemporario, fileName, pontuacaoRef.id);
-          console.log('✅ PDF salvo no Cloudinary, URL final:', urlFinalCloudinary);
-
-          // 4. Atualizar dados NO Firebase com informações adicionais do Santander
-          // (a URL já foi salva corretamente pela função de upload)
-          const dadosAtualizados = {
-            // boletoPdfUrl e boletoDownloadUrl JÁ FORAM SALVOS pela uploadPdfParaCloudinary
-            boletoPdfUploadDate: new Date(),
-            santanderResponse: boletoResponse.data || boletoResponse, // Garante salvar a resposta completa
-            boletoLinhaDigitavel: digitableLine,
-            boletoCodigoBarras: boletoResponse.barCode || "N/A",
-            boletoNsuCode: boletoResponse.nsuCode || "N/A", // Vem direto da resposta
-            qrCodePix: boletoResponse.qrCodePix || boletoResponse.qrCode || "N/A",
-            status: 'pendente' // Define o status final como pendente
-          };
-
-          await pontuacaoRef.update(dadosAtualizados);
-          console.log('✅ Dados adicionais do Santander atualizados no Firebase');
-
-          // 5. Baixar PDF automaticamente para o usuário (usando o link temporário do Santander)
-          // Isso garante que o usuário tenha o boleto imediatamente
-          await baixarPdfAutomaticamente(pdfUrlTemporario, fileName);
-          console.log('✅ Download automático (via link temp) realizado');
-
-          // Retornar dados completos, incluindo a URL final do Cloudinary
-          return {
-            ...(boletoResponse.data || boletoResponse), // Usa a resposta completa do Santander
-            boletoPdfUrl: urlFinalCloudinary, // URL final do Cloudinary
-            pdfUrlTemporario: pdfUrlTemporario, // Link temporário (para referência)
-            pontuacaoId: pontuacaoRef.id,
-            qrCode: dadosAtualizados.qrCodePix // Garante que o QR Code correto seja retornado
-          };
-
-        } catch (error) {
-          console.error('💥 Erro no processo completo do boleto:', error);
-          // Tenta atualizar o status no Firebase para 'erro'
-          try {
-              await pontuacaoRef.update({
-                  status: 'erro',
-                  erroProcessamento: error.message || 'Erro desconhecido no processo completo'
-              });
-          } catch (updateError) {
-              console.error('Erro ao tentar atualizar status para erro:', updateError);
-          }
-          throw error; // Re-lança o erro
-        }
-      }
-
-
-     // --- Funções da Interface (Mostrar QR Code, Copiar PIX, Mostrar Confirmação) ---
-      function mostrarQrCode(qrCodeData) {
-        const qrCodeImageDiv = document.getElementById('qrCodeImage');
-        currentQrCodeData = qrCodeData; // Armazena para cópia
-
-        if (!qrCodeImageDiv) return;
-
-        const qrString = qrCodeData?.qrCodeString;
-        const qrImage = qrCodeData?.qrCodeImage; // Pode ser uma URL base64 ou externa
-
-        if (qrImage) {
-            qrCodeImageDiv.innerHTML = `<img src="${qrImage}" alt="QR Code PIX" class="mx-auto max-w-xs h-auto block">`;
-        } else if (qrString && qrString !== "N/A") {
-             // Tentar gerar QR Code localmente (requer biblioteca como qrcode.js)
-             // Se não tiver a biblioteca, mostrar apenas o texto
-             qrCodeImageDiv.innerHTML = `
-                <div class="bg-gray-100 p-3 rounded-lg border border-gray-200">
-                  <p class="text-xs text-gray-600 mb-1">Código PIX (Copia e Cola):</p>
-                  <p class="font-mono text-xs break-all bg-white p-2 rounded shadow-sm">${qrString}</p>
-                </div>
-              `;
-             // Para gerar imagem:
-             // 1. Inclua <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script> no <head>
-             // 2. Use o código abaixo:
-             /*
-             qrCodeImageDiv.innerHTML = ''; // Limpa
-             try {
-                new QRCode(qrCodeImageDiv, {
-                    text: qrString,
-                    width: 200,
-                    height: 200,
-                    colorDark : "#000000",
-                    colorLight : "#ffffff",
-                    correctLevel : QRCode.CorrectLevel.H
-                });
-             } catch(e) {
-                 console.error("Erro ao gerar QR Code:", e);
-                 qrCodeImageDiv.innerHTML = '<p class="text-red-500">Erro ao gerar imagem QR Code.</p>';
-             }
-             */
-        } else {
-          qrCodeImageDiv.innerHTML = '<p class="text-center text-red-500 font-medium">QR Code PIX não disponível.</p>';
-        }
-
-        qrCodeModal?.classList.add('active');
-      }
-
-      async function copiarCodigoPix() {
-        if (!currentQrCodeData || !currentQrCodeData.qrCodeString || currentQrCodeData.qrCodeString === "N/A") {
-          alert('Código PIX Copia e Cola não disponível.');
-          return;
-        }
-        const textToCopy = currentQrCodeData.qrCodeString;
-        try {
-          await navigator.clipboard.writeText(textToCopy);
-          alert('Código PIX copiado!');
-        } catch (err) {
-          console.error('Falha ao copiar (navigator.clipboard):', err);
-          // Fallback manual
-          try {
-              const textArea = document.createElement("textarea");
-              textArea.value = textToCopy;
-              textArea.style.position = "fixed"; textArea.style.top = "-9999px"; textArea.style.left = "-9999px";
-              document.body.appendChild(textArea);
-              textArea.select();
-              document.execCommand('copy');
-              document.body.removeChild(textArea);
-              alert('Código PIX copiado (fallback)!');
-          } catch (fallbackErr) {
-              console.error('Falha ao copiar (fallback):', fallbackErr);
-              alert('Não foi possível copiar automaticamente. Selecione e copie o código manualmente.');
-              // Opcional: Selecionar o texto no modal para facilitar
-              const codeElement = qrCodeModal?.querySelector('.font-mono');
-              if (codeElement) {
-                  const range = document.createRange();
-                  range.selectNodeContents(codeElement);
-                  const selection = window.getSelection();
-                  selection.removeAllRanges();
-                  selection.addRange(range);
-              }
-          }
-        }
-      }
-
-    function mostrarConfirmacao(dados) {
-        const confirmacaoContainer = document.getElementById('confirmacao-container');
-        if (!confirmacaoContainer) return;
-
-        // Buscar dados mais recentes (garante nome/foto atualizados)
-        const profissional = profissionaisAtivos.find(p => p.id === dados.profissionalId) || { nome: dados.profissionalNome, fotoPerfilURL: null, cpf: null, tipoProfissional: null };
-        const vendedor = vendedoresAtivos.find(v => v.id === dados.vendedorId) || { nome: dados.vendedorNome, fotoURL: null, cpf: null, funcao: null };
-
-        // Formatar CPFs
-        const formatarCpf = (cpf) => {
-            if (!cpf) return 'Não informado';
-            const cpfLimpo = cpf.toString().replace(/\D/g, '').padStart(11, '0');
-            return cpfLimpo.length === 11 ? cpfLimpo.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4") : 'Inválido';
-        };
-
-        // Preencher detalhes
-        const setHTML = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
-        const setText = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
-
-        setHTML('conf-profissional-img', profissional.fotoPerfilURL
-            ? `<img src="${profissional.fotoPerfilURL}" alt="${profissional.nome || ''}">`
-            : '<i class="fas fa-user"></i>');
-        setText('conf-profissional', profissional.nome || 'Profissional não encontrado');
-        setText('conf-profissional-details', `${profissional.tipoProfissional || 'Profissional'} | CPF: ${formatarCpf(profissional.cpf)}`);
-
-        setHTML('conf-vendedor-img', vendedor.fotoURL
-            ? `<img src="${vendedor.fotoURL}" alt="${vendedor.nome || ''}">`
-            : '<i class="fas fa-user-tie"></i>');
-        setText('conf-vendedor', vendedor.nome || 'Vendedor não encontrado');
-        setText('conf-vendedor-details', `${vendedor.funcao || 'Vendedor'} | CPF: ${formatarCpf(vendedor.cpf)}`);
-
-        // Datas precisam ser tratadas corretamente
-        const dataCompra = dados.dataReferencia ? new Date(dados.dataReferencia + 'T00:00:00') : null; // Assume YYYY-MM-DD
-        const vencimento = dados.vencimento instanceof Date ? dados.vencimento : (dados.vencimento ? new Date(dados.vencimento) : null);
-
-        setText('conf-data-compra', dataCompra ? dataCompra.toLocaleDateString('pt-BR') : 'N/D');
-        setText('conf-valor-compra', (dados.valorCompra || 0).toFixed(2).replace('.', ','));
-        setText('conf-pontos', dados.pontos || 0);
-        setText('conf-observacao', dados.observacao || 'Nenhuma');
-        setText('conf-valor-boleto', (dados.valorBoleto || 0).toFixed(2).replace('.', ','));
-        setText('conf-vencimento', vencimento ? vencimento.toLocaleDateString('pt-BR') : 'N/D');
-
-        confirmacaoContainer.style.display = 'block';
-        confirmacaoContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-        // Configurar botões da confirmação
-        const viewQrCodeBtnConfirm = document.getElementById('view-qrcode-confirm');
-        const downloadBoletoBtnConfirm = document.getElementById('download-boleto-confirm');
-
-        if (viewQrCodeBtnConfirm) {
-            viewQrCodeBtnConfirm.onclick = () => {
-                if (currentBoletoData?.qrCode && currentBoletoData.qrCode !== "N/A") {
-                    mostrarQrCode({ qrCodeString: currentBoletoData.qrCode, qrCodeImage: currentBoletoData.qrCodeImage });
-                } else {
-                    alert('QR Code PIX não disponível para este boleto.');
-                }
-            };
-        }
-
-        if (downloadBoletoBtnConfirm) {
-            downloadBoletoBtnConfirm.onclick = () => {
-                const urlParaBaixar = currentBoletoData?.boletoPdfUrl; // Usa a URL final salva
-                if (urlParaBaixar) {
-                    console.log('🚀 Iniciando download direto (confirmação) para:', urlParaBaixar);
-                    window.open(urlParaBaixar, '_blank');
-                    downloadBoletoBtnConfirm.disabled = true; // Desabilita temporariamente
-                    setTimeout(() => { downloadBoletoBtnConfirm.disabled = false; }, 1500);
-                } else {
-                    alert('Erro: URL de download não encontrada para o boleto atual.');
-                    console.error('Download (confirmação) falhou: currentBoletoData.boletoPdfUrl indisponível.');
-                }
-            };
-        }
-    }
-
-
-     // --- Lógica do Formulário ---
-     // Calcular pontuação automaticamente
-      const valorCompraInput = document.getElementById('valor-compra');
-      const pontuacaoInput = document.getElementById('pontuacao-input');
-      if (valorCompraInput && pontuacaoInput) {
-        valorCompraInput.addEventListener('input', function() {
-          const valorTexto = this.value.replace(/\./g, '').replace(',', '.');
-          const valor = parseFloat(valorTexto) || 0;
-          pontuacaoInput.value = Math.floor(valor); // 1 ponto por real
-        });
-      }
-
-      // Submissão do Formulário
-      const pontuacaoForm = document.getElementById('pontuacao-form');
-      if (pontuacaoForm) {
-        pontuacaoForm.addEventListener('submit', async function(e) {
-          e.preventDefault();
-          const submitButton = document.getElementById('submit-button');
-          if (!submitButton) return;
-          const originalText = submitButton.innerHTML;
-          submitButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Processando...';
-          submitButton.disabled = true;
-          let pontuacaoRefId = null; // Para referência em caso de erro
-
-          try {
-            // Coleta e Validação
-            const profissionalId = document.getElementById('profissional-id').value;
-            const vendedorId = document.getElementById('vendedor-id').value;
-            const dataReferencia = document.getElementById('data-referencia').value; // YYYY-MM-DD
-            const valorTexto = valorCompraInput.value.replace(/\./g, '').replace(',', '.');
-            const valorCompra = parseFloat(valorTexto) || 0;
-            const observacao = document.getElementById('observacao').value.trim();
-            const pontos = parseInt(pontuacaoInput.value) || 0;
-
-            if (!profissionalId || !vendedorId || !dataReferencia || valorCompra <= 0 || pontos <= 0) {
-              throw new Error('Preencha Profissional, Vendedor, Data e Valor (maior que zero) corretamente.');
-            }
-            if (new Date(dataReferencia) > new Date()) {
-                throw new Error('A Data da Compra não pode ser no futuro.');
-            }
-
-            const profissional = profissionaisAtivos.find(p => p.id === profissionalId);
-            const vendedor = vendedoresAtivos.find(v => v.id === vendedorId);
-            if (!profissional) throw new Error('Profissional selecionado inválido.');
-            if (!vendedor) throw new Error('Vendedor selecionado inválido.');
-
-            // Cálculo do Boleto
-            const valorBoleto = pontos * 0.02; // Taxa de 2% sobre os pontos
-
-             // Dados para Backend
-             const dadosBoletoParaBackend = {
-                profissionalId, profissionalNome: profissional.nome,
-                vendedorId, vendedorNome: vendedor.nome,
-                valor: valorBoleto,
-                pagadorNome: lojistaData.nomeFantasia || lojistaData.nome || "Lojista N/D",
-                pagadorDocumento: lojistaData.cnpj || "00000000000000",
-                pagadorEndereco: lojistaData.endereco || "N/D", bairro: lojistaData.bairro || "N/D",
-                pagadorCidade: lojistaData.cidade || "N/D", pagadorEstado: lojistaData.estado || "SP",
-                pagadorCEP: lojistaData.cep || "00000000",
-                valorCompra, pontos, observacao, dataReferencia
-             };
-             const requestData = { dadosBoleto: dadosBoletoParaBackend, lojistaId };
-
-            console.log('📤 Enviando dados para processar boleto completo...');
-
-            // Salvar Rascunho no Firebase
-            const dadosFirebase = {
-              lojistaId, lojistaNome: lojistaData.nomeFantasia || lojistaData.nome,
-              profissionalId, profissionalNome: profissional.nome,
-              vendedorId, vendedorNome: vendedor.nome,
-              dataReferencia: firebase.firestore.Timestamp.fromDate(new Date(dataReferencia + 'T00:00:00')), // Salva como Timestamp
-              observacao: observacao || "", valorCompra, pontos,
-              status: 'processando', // Estado inicial
-              data: firebase.firestore.FieldValue.serverTimestamp(), // Data de criação
-              dataPagamento: null,
-              boletoValor: parseFloat(valorBoleto.toFixed(2))
-            };
-            const pontuacaoRef = await db.collection('pontuacoes').add(dadosFirebase);
-            pontuacaoRefId = pontuacaoRef.id; // Guarda ID para possível rollback ou log
-            console.log('✅ Rascunho da Pontuação salva com ID:', pontuacaoRefId);
-
-            // Processar Boleto Completo (Santander + Cloudinary + Atualizar Firebase)
-            const boletoResponseCompleto = await processarBoletoCompleto(requestData, pontuacaoRef);
-            currentBoletoData = boletoResponseCompleto; // Guarda dados do boleto atual
-            console.log('✅ Processo completo do boleto concluído no frontend:', boletoResponseCompleto);
-
-            // Salvar na Subcoleção do Profissional (APÓS SUCESSO)
-             const dadosProfissional = {
-                lojistaId, lojistaNome: lojistaData.nomeFantasia || lojistaData.nome,
-                profissionalId, profissionalNome: profissional.nome,
-                vendedorId, vendedorNome: vendedor.nome,
-                dataReferencia: dadosFirebase.dataReferencia, // Usa o mesmo Timestamp
-                observacao: observacao || "", valorCompra, pontos,
-                status: 'pendente', // Status final após sucesso
-                data: dadosFirebase.data, // Usa o mesmo Timestamp de criação
-                dataPagamento: null,
-                boletoId: boletoResponseCompleto.nsuCode || "N/A", // NSU code do Santander
-                boletoValor: parseFloat(valorBoleto.toFixed(2)),
-                boletoVencimento: boletoResponseCompleto.dueDate ? firebase.firestore.Timestamp.fromDate(new Date(boletoResponseCompleto.dueDate + 'T00:00:00')) : null,
-                qrCodePix: boletoResponseCompleto.qrCode || "N/A",
-                pontuacaoId: pontuacaoRefId, // Referência ao doc principal
-                boletoPdfUrl: boletoResponseCompleto.boletoPdfUrl // URL final do Cloudinary
-            };
-            await db.collection('profissionais').doc(profissionalId).collection('pontuacoes').add(dadosProfissional);
-            console.log('✅ Dados salvos na subcoleção do profissional');
-
-            // Mostrar Confirmação
-            mostrarConfirmacao({
-                profissionalId, vendedorId, dataReferencia, valorCompra, pontos, observacao,
-                valorBoleto: parseFloat(valorBoleto.toFixed(2)),
-                vencimento: boletoResponseCompleto.dueDate ? new Date(boletoResponseCompleto.dueDate + 'T00:00:00') : null
-            });
-
-            // Limpar Formulário e Recarregar Histórico
-            pontuacaoForm.reset();
-            if(dataReferenciaInput) dataReferenciaInput.valueAsDate = new Date(); // Resetar data
-            document.getElementById('profissional-select-trigger').querySelector('span').textContent = 'Selecione profissional';
-            document.getElementById('vendedor-select-trigger').querySelector('span').textContent = 'Selecione vendedor';
-            document.getElementById('profissional-id').value = '';
-            document.getElementById('vendedor-id').value = '';
-            $(valorCompraInput).trigger('input'); // Resetar pontos usando jQuery
-
-            await carregarHistoricoPontuacoes();
-            console.log('🎉 Processo de pontuação concluído com sucesso!');
-
-          } catch (error) {
-            console.error('💥 Erro GERAL na submissão do formulário:', error);
-            alert('Falha ao processar pontuação: ' + error.message);
-            // Tentar marcar como erro no Firebase se o doc foi criado
-            if (pontuacaoRefId) {
-                try {
-                    await db.collection('pontuacoes').doc(pontuacaoRefId).update({
-                        status: 'erro',
-                        erroProcessamento: error.message || 'Erro desconhecido na submissão'
-                    });
-                     // Recarrega histórico para mostrar o item com status 'erro'
-                     await carregarHistoricoPontuacoes();
-                } catch (updateError) {
-                    console.error(`Falha ao atualizar status para erro no doc ${pontuacaoRefId}:`, updateError);
-                }
-            }
-          } finally {
-            submitButton.innerHTML = originalText;
-            submitButton.disabled = false;
-          }
-        });
-      }
-
-      // --- Botões Pós-Confirmação ---
-      const novaPontuacaoBtn = document.getElementById('nova-pontuacao');
-      const verHistoricoBtn = document.getElementById('ver-historico');
-      const confirmacaoContainer = document.getElementById('confirmacao-container');
-      const historicoPontuacoesDiv = document.getElementById('historico-pontuacoes');
-
-      if (novaPontuacaoBtn && confirmacaoContainer && pontuacaoForm) {
-        novaPontuacaoBtn.addEventListener('click', () => {
-          confirmacaoContainer.style.display = 'none';
-          pontuacaoForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        });
-      }
-      if (verHistoricoBtn && historicoPontuacoesDiv) {
-        verHistoricoBtn.addEventListener('click', () => {
-          historicoPontuacoesDiv.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        });
-      }
-
-       // --- Botão de Debug ---
-       const debugBtn = document.getElementById('debug-btn');
-       if (debugBtn) {
-           debugBtn.addEventListener('click', debugFirebaseData);
-       }
-       async function debugFirebaseData() { /* ... (função debug como estava) ... */
-            try {
-              console.log('🐛 DEBUG: Verificando dados no Firebase...');
-              if (!lojistaId) { console.log("Lojista ID ainda não carregado."); return; }
-
-              // Verificar pontuações recentes do lojista
-              const pontuacoesSnapshot = await db.collection('pontuacoes')
-                .where('lojistaId', '==', lojistaId)
-                .orderBy('data', 'desc')
-                .limit(5)
-                .get();
-              console.log(`📊 Últimas ${pontuacoesSnapshot.size} pontuações encontradas:`);
-              pontuacoesSnapshot.forEach(doc => console.log(`📋 Pontuação ${doc.id}:`, doc.data()));
-
-              // Verificar profissionais e vendedores carregados
-              console.log(`👥 ${profissionaisAtivos.length} profissionais na memória:`, profissionaisAtivos.map(p=>({id: p.id, nome: p.nome})));
-              console.log(`👨‍💼 ${vendedoresAtivos.length} vendedores na memória:`, vendedoresAtivos.map(v=>({id: v.id, nome: v.nome})));
-
-              // Forçar recarga do histórico
-              console.log("🔄 Forçando recarga do histórico...");
-              await carregarHistoricoPontuacoes();
-              console.log("✅ Histórico recarregado.");
-
-            } catch (error) {
-              console.error('❌ Erro no debug:', error);
-            }
-       }
-
-
-   }); // Fim do DOMContentLoaded
- </script>
-</body>
-</html>
+    data.setUTCDate(data.getUTCDate() + 1); // Avança um dia em UTC
+  }
+
+  // Formata a data final
+  return formatarDataParaSantander(data);
+}
+
+
+function gerarNsuDate() {
+  // CORREÇÃO: Retorna 'hoje' no fuso de SP
+  return formatarDataParaSantander(new Date());
+}
+
+function gerarIssueDate() {
+  // CORREÇÃO: Retorna 'hoje' no fuso de SP
+  // A data de emissão (issueDate) deve ser a data de hoje (igual ao NsuDate).
+  return formatarDataParaSantander(new Date());
+}
+
+function formatarValorParaSantander(valor) {
+  return parseFloat(valor).toFixed(2);
+}
+
+// =============================================
+// ✅ FIM DA CORREÇÃO: FUNÇÕES AUXILIARES DE DATA
+// =============================================
+
+
+// =============================================
+// FUNÇÃO: GERAR NSU (15 dígitos: YYMMDDHHMMSS + 3 dígitos sequenciais)
+// =============================================
+async function gerarNSU(clientNumber) {
+// CORREÇÃO: Usar a data de SP para gerar o NSU
+const agoraSP = new Date(new Date().toLocaleString("en-US", {timeZone: "America/Sao_Paulo"}));
+
+const YY = String(agoraSP.getFullYear()).slice(-2);
+const MM = String(agoraSP.getMonth() + 1).padStart(2, '0');
+const DD = String(agoraSP.getDate()).padStart(2, '0');
+const HH = String(agoraSP.getHours()).padStart(2, '0');
+const min = String(agoraSP.getMinutes()).padStart(2, '0');
+const SS = String(agoraSP.getSeconds()).padStart(2, '0');
+
+// Gerar sequencial único
+if (!db) {
+console.error('❌ Firestore não inicializado para gerar NSU');
+return `${YY}${MM}${DD}${HH}${min}${SS}001`;
+}
+
+try {
+const ref = db.collection('config').doc('ultimoNSU');
+const doc = await ref.get();
+let ultimoSequencial = 0;
+
+if (doc.exists && doc.data()?.sequencial) {
+ultimoSequencial = parseInt(doc.data().sequencial);
+}
+
+const novoSequencial = (ultimoSequencial + 1) % 1000; // 000-999
+await ref.set({ sequencial: novoSequencial });
+
+const sequencialStr = String(novoSequencial).padStart(3, '0');
+const nsu = `${YY}${MM}${DD}${HH}${min}${SS}${sequencialStr}`;
+
+console.log(`🔢 NSU gerado (Fuso SP): ${nsu}`);
+return nsu;
+} catch (error) {
+console.error('❌ Erro ao gerar NSU:', error);
+// Fallback: timestamp + clientNumber
+return `${YY}${MM}${DD}${HH}${min}${SS}${String(clientNumber).slice(-3).padStart(3, '0')}`;
+}
+}
+
+// =============================================
+// FUNÇÃO: GERAR bankNumber SEQUENCIAL
+// =============================================
+async function gerarBankNumber() {
+if (!db) {
+console.error('❌ Firestore não inicializado');
+return "0040";
+}
+
+try {
+const ref = db.collection('config').doc('ultimoBankNumber');
+const doc = await ref.get();
+let ultimo = 39; // começa antes de 40 para incrementar
+
+if (doc.exists && doc.data()?.value) {
+ultimo = parseInt(doc.data().value);
+}
+
+const novoBankNumber = ultimo + 1;
+await ref.set({ value: novoBankNumber });
+
+const bankNumberStr = String(novoBankNumber).padStart(4, '0');
+console.log(`🏦 BankNumber gerado: ${bankNumberStr}`);
+
+return bankNumberStr;
+} catch (error) {
+console.error('❌ Erro ao gerar bankNumber:', error);
+return "0040"; // Fallback
+}
+}
+
+// =============================================
+// ROTA: REGISTRAR BOLETO (CORRIGIDA)
+// =============================================
+app.post('/api/santander/boletos', async (req, res) => {
+console.log("📥 Recebendo requisição para gerar boleto...");
+
+const { dadosBoleto, lojistaId } = req.body;
+if (!dadosBoleto || !lojistaId) {
+return res.status(400).json({
+error: 'Dados do boleto ou ID do lojista não fornecidos',
+details: 'Verifique se dadosBoleto e lojistaId estão presentes no corpo da requisição'
+});
+}
+
+try {
+// Buscar clientNumber do lojista
+const clientNumber = await buscarClientNumber(lojistaId);
+if (!clientNumber) {
+return res.status(400).json({
+error: 'ClientNumber do lojista não encontrado',
+details: `Lojista ${lojistaId} não possui clientNumber cadastrado no Firebase`
+});
+}
+
+// Obter token Santander
+const accessToken = await obterTokenSantander();
+
+// Criar workspace
+const workspaceId = await criarWorkspace(accessToken);
+
+// Gerar números únicos
+const bankNumber = await gerarBankNumber();
+const nsuCode = await gerarNSU(clientNumber); // Já está corrigido para fuso SP
+
+console.log("\n=== [3] Registrando BOLETO ===");
+
+// Calcular datas (JÁ CORRIGIDO PARA FUSO SP)
+const dueDate = calcularQuintoDiaUtilProximoMes();
+const nsuDate = gerarNsuDate();
+const issueDate = gerarIssueDate(); // issueDate agora é igual a nsuDate
+
+// CORREÇÕES APLICADAS: Payload simplificado e correto
+const payload = {
+environment: "PRODUCAO",
+nsuCode: nsuCode, // 15 dígitos garantidos
+nsuDate: nsuDate, // CORRIGIDO PARA FUSO SP
+covenantCode: SANTANDER_CONFIG.COVENANT_CODE,
+bankNumber: bankNumber,
+clientNumber: String(clientNumber).padStart(5, "0"),
+dueDate: dueDate, // CORRIGIDO PARA FUSO SP
+issueDate: issueDate, // CORRIGIDO PARA FUSO SP
+participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE, // "00000001" - CORRIGIDO
+nominalValue: formatarValorParaSantander(dadosBoleto.valor), // CORREÇÃO: valor direto, não cálculo complexo
+payer: {
+name: dadosBoleto.pagadorNome.toUpperCase().substring(0, 40), // Limite de caracteres
+documentType: "CNPJ",
+documentNumber: dadosBoleto.pagadorDocumento,
+address: dadosBoleto.pagadorEndereco.toUpperCase().substring(0, 40),
+neighborhood: dadosBoleto.bairro.toUpperCase().substring(0, 20),
+city: dadosBoleto.pagadorCidade.toUpperCase().substring(0, 20),
+state: dadosBoleto.pagadorEstado.toUpperCase(),
+zipCode: dadosBoleto.pagadorCEP.replace(/(\d{5})(\d{3})/, "$1-$2")
+},
+documentKind: "DUPLICATA_MERCANTIL",
+deductionValue: "0.00",
+paymentType: "REGISTRO",
+writeOffQuantityDays: "30",
+messages: [
+"Boleto gerado via Mendes Connexions",
+"Em caso de dúvidas entre em contato"
+],
+key: {
+type: "CNPJ",
+dictKey: SANTANDER_CONFIG.DICT_KEY
+}
+// CORREÇÃO: Removidos discount e interestPercentage (campos opcionais problemáticos)
+};
+
+console.log("📦 Payload Boleto Corrigido:", JSON.stringify(payload, null, 2));
+
+const httpsAgent = createHttpsAgent();
+if (!httpsAgent) {
+throw new Error('Agente HTTPS não disponível');
+}
+
+// Registrar boleto no Santander
+const boletoResponse = await axios.post(
+`https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips`,
+payload,
+{
+headers: {
+'Content-Type': 'application/json',
+'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+'Authorization': `Bearer ${accessToken}`,
+'Accept': 'application/json'
+},
+httpsAgent,
+timeout: 30000
+}
+);
+
+console.log("✅ Boleto registrado com sucesso!");
+console.log("📋 Resposta Santander:", JSON.stringify(boletoResponse.data, null, 2));
+
+res.json({
+success: true,
+message: 'Boleto registrado com sucesso',
+boletoId: boletoResponse.data.nsuCode,
+bankNumber: bankNumber,
+workspaceId: workspaceId,
+data: boletoResponse.data
+});
+
+} catch (error) {
+console.error("❌ Erro no fluxo Santander:", {
+message: error.message,
+status: error.response?.status,
+data: error.response?.data,
+stack: error.stack
+});
+
+const statusCode = error.response?.status || 500;
+const errorDetails = error.response?.data || error.message;
+
+res.status(statusCode).json({
+error: 'Falha no processo Santander',
+details: errorDetails,
+step: 'registro_boleto',
+timestamp: new Date().toISOString()
+});
+}
+});
+
+// =============================================
+// ROTA: BAIXAR PDF DO BOLETO
+// =============================================
+app.post('/api/santander/boletos/pdf', async (req, res) => {
+console.log("📥 Recebendo requisição para baixar PDF do boleto...");
+
+const { digitableLine, payerDocumentNumber } = req.body;
+if (!digitableLine || !payerDocumentNumber) {
+return res.status(400).json({
+error: "Dados incompletos",
+details: "É necessário informar 'digitableLine' e 'payerDocumentNumber'"
+});
+}
+
+try {
+const accessToken = await obterTokenSantander();
+const httpsAgent = createHttpsAgent();
+
+if (!httpsAgent) {
+throw new Error('Agente HTTPS não disponível');
+}
+
+// Monta a URL substituindo {digitableLine}
+const url = `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`;
+
+const payload = {
+payerDocumentNumber: payerDocumentNumber.toString()
+};
+
+console.log("➡️ Payload PDF:", JSON.stringify(payload, null, 2));
+console.log("➡️ URL:", url);
+
+const response = await axios.post(url, payload, {
+headers: {
+"Content-Type": "application/json",
+"Authorization": `Bearer ${accessToken}`,
+"X-Application-Key": SANTANDER_CONFIG.CLIENT_ID,
+"Accept": "application/json"
+},
+httpsAgent,
+timeout: 30000
+});
+
+// Extrai o link da resposta
+const link = response.data?.link || response.data?.url;
+
+if (!link) {
+console.error("⚠️ Nenhum link retornado pelo Santander:", response.data);
+return res.status(500).json({
+error: "Resposta do Santander não contém link do PDF",
+rawResponse: response.data
+});
+}
+
+console.log("✅ PDF gerado com sucesso! Link:", link);
+
+res.json({
+success: true,
+message: "PDF gerado com sucesso",
+link: link,
+digitableLine: digitableLine
+});
+
+} catch (error) {
+console.error("❌ Erro ao gerar PDF do boleto:", {
+message: error.message,
+status: error.response?.status,
+data: error.response?.data
+});
+
+res.status(500).json({
+error: "Falha ao gerar PDF do boleto",
+details: error.response?.data || error.message,
+step: "gerar_pdf",
+timestamp: new Date().toISOString()
+});
+}
+});
+
+// =============================================
+// ROTA: CONSULTAR BOLETO
+// =============================================
+app.get('/api/santander/boletos/:nsuCode', async (req, res) => {
+const { nsuCode } = req.params;
+
+console.log(`📥 Consultando boleto com NSU: ${nsuCode}`);
+
+try {
+const accessToken = await obterTokenSantander();
+const httpsAgent = createHttpsAgent();
+
+if (!httpsGente) {
+throw new Error('Agente HTTPS não disponível');
+}
+
+const response = await axios.get(
+`https://trust-open.api.santander.com.br/collection_bill_management/v2/bank_slips/${nsuCode}`,
+{
+headers: {
+'Authorization': `Bearer ${accessToken}`,
+'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+'Accept': 'application/json'
+},
+httpsAgent,
+timeout: 30000
+}
+);
+
+console.log("✅ Boleto consultado com sucesso");
+
+res.json({
+success: true,
+message: 'Boleto encontrado',
+data: response.data
+});
+
+} catch (error) {
+console.error("❌ Erro ao consultar boleto:", {
+message: error.message,
+status: error.response?.status,
+data: error.response?.data
+});
+
+res.status(500).json({
+error: "Falha ao consultar boleto",
+details: error.response?.data || error.message,
+step: "consultar_boleto"
+});
+}
+});
+
+// =============================================
+// MIDDLEWARE DE ERRO GLOBAL
+// =============================================
+app.use((error, req, res, next) => {
+console.error('💥 Erro não tratado:', error);
+res.status(500).json({
+error: 'Erro interno do servidor',
+message: error.message,
+timestamp: new Date().toISOString()
+});
+});
+
+// =============================================
+// ROTA 404
+// =============================================
+app.use('*', (req, res) => {
+res.status(404).json({
+error: 'Rota não encontrada',
+path: req.originalUrl,
+method: req.method,
+timestamp: new Date().toISOString()
+});
+});
+
+// =============================================
+// INICIALIZAÇÃO DO SERVIDOR
+// =============================================
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, '0.0.0.0', () => {
+console.log('\n====================================================');
+console.log('🚀 Servidor Mendes Connexions Backend');
+console.log('====================================================');
+console.log('📍 Porta:', PORT);
+console.log('🌍 Ambiente:', process.env.NODE_ENV || 'development');
+console.log('🏥 Health check: http://0.0.0.0:' + PORT + '/health');
+console.log('✅ Servidor rodando com sucesso!');
+console.log('====================================================\n');
+});
+```Danilo, perfeito! Agora sim, este é o seu `server.js` (backend). Peço mil desculpas pela confusão da minha parte, o `<script>` no início do arquivo que você mandou antes me enganou totalmente.
+
+O seu log de `Deploy failed` (Status 1) significa que o código que você enviou quebrou o servidor.
+
+**Eu identifiquei o erro que está causando o "crash" no seu deploy.**
+
+O problema está no código que **eu** te passei para corrigir o fuso horário. Eu cometi um erro na lógica da função `calcularQuintoDiaUtilProximoMes`.
+
+### 🕵️ O Erro que Causa o "Crash"
+
+No bloco de código que eu te dei, a função `calcularQuintoDiaUtilProximoMes` está assim:
+
+```javascript
+function calcularQuintoDiaUtilProximoMes() {
+  // CORREÇÃO: Pega a data de 'hoje' no fuso de SP
+  const hojeStr = formatarDataParaSantander(new Date()); // <-- Esta função ainda não foi definida
+  const [anoHoje, mesHoje, diaHoje] = hojeStr.split('-').map(Number);
+  //...
+}
