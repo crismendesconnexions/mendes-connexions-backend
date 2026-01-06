@@ -656,13 +656,14 @@ async function gerarBankNumber() {
   }
 }
 
-// =============================================
-// ROTA: REGISTRAR BOLETO (CORRIGIDA)
+/ =============================================
+// ROTA: REGISTRAR BOLETO (CORRIGIDA E OTIMIZADA)
 // =============================================
 app.post('/api/santander/boletos', async (req, res) => {
   console.log("📥 Recebendo requisição para gerar boleto...");
 
   const { dadosBoleto, lojistaId } = req.body;
+  
   if (!dadosBoleto || !lojistaId) {
     return res.status(400).json({
       error: 'Dados do boleto ou ID do lojista não fornecidos',
@@ -692,19 +693,19 @@ app.post('/api/santander/boletos', async (req, res) => {
 
     console.log("\n=== [3] Registrando BOLETO ===");
 
-    // ✅ USANDO AS NOVAS FUNÇÕES CORRIGIDAS
-    const dueDate = calcularCincoDiasUteis(); // 5 dias úteis a partir de hoje
-    const nsuDate = gerarDataAtual(); // Data atual
-    const issueDate = gerarDataAtual(); // Data atual
+    const dueDate = calcularCincoDiasUteis();
+    const nsuDate = gerarDataAtual();
+    const issueDate = gerarDataAtual();
 
-    // Payload simplificado e correto
+    // --- CORREÇÕES AQUI ---
     const payload = {
       environment: "PRODUCAO",
       nsuCode: nsuCode,
       nsuDate: nsuDate,
       covenantCode: SANTANDER_CONFIG.COVENANT_CODE,
       bankNumber: bankNumber,
-      clientNumber: String(clientNumber).padStart(5, "0"),
+      // AJUSTE 1: Santander geralmente usa 7 ou 13 dígitos. Mudei para 7 por segurança.
+      clientNumber: String(clientNumber).padStart(7, "0"), 
       dueDate: dueDate,
       issueDate: issueDate,
       participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
@@ -712,12 +713,13 @@ app.post('/api/santander/boletos', async (req, res) => {
       payer: {
         name: dadosBoleto.pagadorNome.toUpperCase().substring(0, 40),
         documentType: "CNPJ",
-        documentNumber: dadosBoleto.pagadorDocumento,
+        documentNumber: dadosBoleto.pagadorDocumento.replace(/\D/g, ''), // Garante só números
         address: dadosBoleto.pagadorEndereco.toUpperCase().substring(0, 40),
         neighborhood: dadosBoleto.bairro.toUpperCase().substring(0, 20),
         city: dadosBoleto.pagadorCidade.toUpperCase().substring(0, 20),
         state: dadosBoleto.pagadorEstado.toUpperCase(),
-        zipCode: dadosBoleto.pagadorCEP.replace(/(\d{5})(\d{3})/, "$1-$2")
+        // AJUSTE 2: Remove traços, envia apenas números "11025002"
+        zipCode: dadosBoleto.pagadorCEP.replace(/\D/g, '') 
       },
       documentKind: "DUPLICATA_MERCANTIL",
       deductionValue: "0.00",
@@ -727,18 +729,17 @@ app.post('/api/santander/boletos', async (req, res) => {
         "Boleto gerado via Mendes Connexions",
         "Em caso de dúvidas entre em contato"
       ],
-      key: {
-        type: "CNPJ",
-        dictKey: SANTANDER_CONFIG.DICT_KEY
-      }
+      // AJUSTE 3: Comente isso se seu convênio não suportar Híbrido (PIX + Boleto)
+      // key: {
+      //   type: "CNPJ",
+      //   dictKey: SANTANDER_CONFIG.DICT_KEY
+      // }
     };
 
     console.log("📦 Payload Boleto Corrigido:", JSON.stringify(payload, null, 2));
 
     const httpsAgent = createHttpsAgent();
-    if (!httpsAgent) {
-      throw new Error('Agente HTTPS não disponível');
-    }
+    if (!httpsAgent) throw new Error('Agente HTTPS não disponível');
 
     // Registrar boleto no Santander
     const boletoResponse = await axios.post(
@@ -769,19 +770,16 @@ app.post('/api/santander/boletos', async (req, res) => {
     });
 
   } catch (error) {
-    console.error("❌ Erro no fluxo Santander:", {
-      message: error.message,
-      status: error.response?.status,
-      data: error.response?.data,
-      stack: error.stack
-    });
+    // AJUSTE 4: Log detalhado para capturar o erro REAL do Santander
+    const santanderError = error.response?.data || {};
+    
+    console.error("❌ Erro no fluxo Santander DETALHADO:");
+    console.error(JSON.stringify(santanderError, null, 2)); // Isso vai mostrar o motivo exato
 
-    const statusCode = error.response?.status || 500;
-    const errorDetails = error.response?.data || error.message;
-
-    res.status(statusCode).json({
+    res.status(error.response?.status || 500).json({
       error: 'Falha no processo Santander',
-      details: errorDetails,
+      details: santanderError, 
+      message: error.message,
       step: 'registro_boleto',
       timestamp: new Date().toISOString()
     });
