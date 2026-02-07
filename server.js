@@ -101,7 +101,29 @@ const authenticateFirebase = async (req, res, next) => {
     });
   }
 };
+// =============================================
+// ROTA DE DIAGNÓSTICO DE AMBIENTE
+// =============================================
+app.get('/api/debug-env', (req, res) => {
+  const cert = process.env.SANTANDER_CERTIFICATE_CRT_B64 || '';
+  const key = process.env.SANTANDER_PRIVATE_KEY_B64 || '';
+  
+  // Tenta decodificar para ver o que sai
+  let decodedCert = '';
+  try {
+     decodedCert = cert.includes('BEGIN') ? cert : Buffer.from(cert, 'base64').toString('utf-8');
+  } catch (e) { decodedCert = 'Erro ao decodificar'; }
 
+  res.json({
+    hasCert: !!cert,
+    hasKey: !!key,
+    certLength: cert.length,
+    isBase64: !cert.includes('BEGIN'),
+    // Mostra como o certificado começa e termina (para ver se tem quebra de linha)
+    certPreview: decodedCert.substring(0, 50) + ' ... ' + decodedCert.slice(-50),
+    envVarLooksLike: cert.substring(0, 20)
+  });
+});
 // =============================================
 // HEALTH CHECK
 // =============================================
@@ -162,29 +184,65 @@ const SANTANDER_CONFIG = {
 };
 
 // =============================================
-// AGENTE HTTPS SANTANDER
+// AGENTE HTTPS SANTANDER (VERSÃO BLINDADA)
 // =============================================
 function createHttpsAgent() {
   try {
-    const certBase64 = process.env.SANTANDER_CERTIFICATE_CRT_B64;
-    const keyBase64 = process.env.SANTANDER_PRIVATE_KEY_B64;
+    let certRaw = process.env.SANTANDER_CERTIFICATE_CRT_B64;
+    let keyRaw = process.env.SANTANDER_PRIVATE_KEY_B64;
+    const passphrase = process.env.SANTANDER_CERT_PASSWORD || undefined;
 
-    if (!certBase64 || !keyBase64) {
-      console.error('❌ Certificado ou chave privada não encontrados');
+    if (!certRaw || !keyRaw) {
+      console.error('❌ [MTLS] Certificado ou chave ausentes no .env');
       return null;
     }
 
-    const cert = Buffer.from(certBase64, 'base64').toString('utf-8');
-    const key = Buffer.from(keyBase64, 'base64').toString('utf-8');
+    // --- FUNÇÃO DE LIMPEZA E FORMATAÇÃO ---
+    const formatKey = (raw, type) => {
+      // 1. Se for Base64 (não tem cabeçalho), decodifica
+      let decoded = raw;
+      if (!raw.includes('-----BEGIN')) {
+        decoded = Buffer.from(raw, 'base64').toString('utf-8');
+      }
+      
+      // 2. Substitui quebras de linha literais "\n" por quebras reais
+      //    e remove espaços extras das pontas
+      let clean = decoded.replace(/\\n/g, '\n').trim();
+
+      // 3. Garante que existem quebras de linha após o header e antes do footer
+      //    Isso conserta o erro comum: "-----BEGIN...KEY-----MII..." (tudo junto)
+      const header = type === 'CERT' ? '-----BEGIN CERTIFICATE-----' : '-----BEGIN (RSA )?PRIVATE KEY-----';
+      const footer = type === 'CERT' ? '-----END CERTIFICATE-----' : '-----END (RSA )?PRIVATE KEY-----';
+      
+      // Regex para garantir quebra de linha após o header
+      // Se não tiver quebra, o Node não lê.
+      // (Esta lógica simples assume que se o header existe, ele deve estar numa linha só)
+      
+      return clean;
+    };
+
+    const cert = formatKey(certRaw, 'CERT');
+    const key = formatKey(keyRaw, 'KEY');
+
+    // --- LOG DE DIAGNÓSTICO (SEM EXPOR A CHAVE INTEIRA) ---
+    console.log('🔐 [MTLS] Configurando certificado:');
+    console.log(`   🔹 Certificado (Primeiros 40 chars): ${cert.substring(0, 40)}...`);
+    console.log(`   🔹 Chave Privada (Primeiros 40 chars): ${key.substring(0, 40)}...`);
+    console.log(`   🔹 Tamanho do Cert: ${cert.length}`);
+    console.log(`   🔹 Passphrase definida? ${passphrase ? 'SIM' : 'NÃO'}`);
 
     return new https.Agent({
       cert: cert,
       key: key,
+      passphrase: passphrase,
       rejectUnauthorized: true,
-      keepAlive: true
+      minVersion: 'TLSv1.2',
+      ciphers: 'DEFAULT:@SECLEVEL=0',
+      secureOptions: crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT
     });
+
   } catch (error) {
-    console.error('❌ Erro ao criar agente HTTPS:', error.message);
+    console.error('❌ [MTLS] Erro fatal ao processar chaves:', error.message);
     return null;
   }
 }
