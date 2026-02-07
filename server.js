@@ -193,56 +193,41 @@ function createHttpsAgent() {
     const passphrase = process.env.SANTANDER_CERT_PASSWORD || undefined;
 
     if (!certRaw || !keyRaw) {
-      console.error('❌ [MTLS] Certificado ou chave ausentes no .env');
+      console.error('❌ [MTLS] Faltam variáveis de ambiente');
       return null;
     }
 
-    // --- FUNÇÃO DE LIMPEZA E FORMATAÇÃO ---
-    const formatKey = (raw, type) => {
-      // 1. Se for Base64 (não tem cabeçalho), decodifica
+    const cleanKey = (raw) => {
       let decoded = raw;
+      // Se estiver em Base64, decodifica
       if (!raw.includes('-----BEGIN')) {
         decoded = Buffer.from(raw, 'base64').toString('utf-8');
       }
-      
-      // 2. Substitui quebras de linha literais "\n" por quebras reais
-      //    e remove espaços extras das pontas
-      let clean = decoded.replace(/\\n/g, '\n').trim();
-
-      // 3. Garante que existem quebras de linha após o header e antes do footer
-      //    Isso conserta o erro comum: "-----BEGIN...KEY-----MII..." (tudo junto)
-      const header = type === 'CERT' ? '-----BEGIN CERTIFICATE-----' : '-----BEGIN (RSA )?PRIVATE KEY-----';
-      const footer = type === 'CERT' ? '-----END CERTIFICATE-----' : '-----END (RSA )?PRIVATE KEY-----';
-      
-      // Regex para garantir quebra de linha após o header
-      // Se não tiver quebra, o Node não lê.
-      // (Esta lógica simples assume que se o header existe, ele deve estar numa linha só)
-      
-      return clean;
+      // Remove "Bag Attributes" e outros textos antes do BEGIN
+      // Mantém apenas o que está entre os demarcadores -----
+      const match = decoded.match(/-----BEGIN[\s\S]+?-----END[\s\S]+?-----/g);
+      if (match) return match[0].replace(/\\n/g, '\n');
+      return decoded.replace(/\\n/g, '\n');
     };
 
-    const cert = formatKey(certRaw, 'CERT');
-    const key = formatKey(keyRaw, 'KEY');
+    const cert = cleanKey(certRaw);
+    const key = cleanKey(keyRaw);
 
-    // --- LOG DE DIAGNÓSTICO (SEM EXPOR A CHAVE INTEIRA) ---
-    console.log('🔐 [MTLS] Configurando certificado:');
-    console.log(`   🔹 Certificado (Primeiros 40 chars): ${cert.substring(0, 40)}...`);
-    console.log(`   🔹 Chave Privada (Primeiros 40 chars): ${key.substring(0, 40)}...`);
-    console.log(`   🔹 Tamanho do Cert: ${cert.length}`);
-    console.log(`   🔹 Passphrase definida? ${passphrase ? 'SIM' : 'NÃO'}`);
-
-    return new https.Agent({
+    // Configuração mais compatível e direta
+    const agentOptions = {
       cert: cert,
       key: key,
-      passphrase: passphrase,
-      rejectUnauthorized: true,
+      rejectUnauthorized: false, // Em teste/produção Santander, às vezes necessário se o root deles for interno
       minVersion: 'TLSv1.2',
-      ciphers: 'DEFAULT:@SECLEVEL=0',
-      secureOptions: crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT
-    });
+      ciphers: 'DEFAULT:@SECLEVEL=0'
+    };
+
+    if (passphrase) agentOptions.passphrase = passphrase;
+
+    return new https.Agent(agentOptions);
 
   } catch (error) {
-    console.error('❌ [MTLS] Erro fatal ao processar chaves:', error.message);
+    console.error('❌ [MTLS] Erro ao criar Agente:', error.message);
     return null;
   }
 }
