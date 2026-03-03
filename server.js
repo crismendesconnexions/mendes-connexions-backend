@@ -552,7 +552,7 @@ app.post('/api/santander/boletos', async (req, res) => {
         neighborhood: dadosBoleto.bairro.toUpperCase().substring(0, 20),
         city: dadosBoleto.pagadorCidade.toUpperCase().substring(0, 20),
         state: dadosBoleto.pagadorEstado.toUpperCase().substring(0, 2),
-        zipCode: dadosBoleto.pagadorCEP.replace(/[^0-9]/g, '')
+        zipCode: dadosBoleto.pagadorCEP.replace(/(\d{5})(\d{3})/, "$1-$2")
       },
       documentKind: "DUPLICATA_MERCANTIL",
       deductionValue: "0.00",
