@@ -499,7 +499,7 @@ async function gerarBankNumber() {
 }
 
 // =============================================
-// ROTA: REGISTRAR BOLETO
+// ROTA: REGISTRAR BOLETO (VERSÃO CORRIGIDA)
 // =============================================
 app.post('/api/santander/boletos', async (req, res) => {
   console.log("📥 Recebendo requisição para gerar boleto...");
@@ -532,6 +532,7 @@ app.post('/api/santander/boletos', async (req, res) => {
     const nsuDate = gerarDataAtual();
     const issueDate = gerarDataAtual();
 
+    // Payload corrigido com base no erro Altair
     const payload = {
       environment: "PRODUCAO",
       nsuCode: nsuCode,
@@ -546,28 +547,36 @@ app.post('/api/santander/boletos', async (req, res) => {
       payer: {
         name: dadosBoleto.pagadorNome.toUpperCase().substring(0, 40),
         documentType: "CNPJ",
-        documentNumber: dadosBoleto.pagadorDocumento,
+        documentNumber: dadosBoleto.pagadorDocumento.replace(/[^0-9]/g, ''),
         address: dadosBoleto.pagadorEndereco.toUpperCase().substring(0, 40),
         neighborhood: dadosBoleto.bairro.toUpperCase().substring(0, 20),
         city: dadosBoleto.pagadorCidade.toUpperCase().substring(0, 20),
-        state: dadosBoleto.pagadorEstado.toUpperCase(),
-        zipCode: dadosBoleto.pagadorCEP.replace(/(\d{5})(\d{3})/, "$1-$2")
+        state: dadosBoleto.pagadorEstado.toUpperCase().substring(0, 2),
+        zipCode: dadosBoleto.pagadorCEP.replace(/[^0-9]/g, '')
       },
       documentKind: "DUPLICATA_MERCANTIL",
       deductionValue: "0.00",
       paymentType: "REGISTRO",
       writeOffQuantityDays: "30",
       messages: [
-        "Boleto gerado via Mendes Connexions",
-        "Em caso de dúvidas entre em contato"
+        "Boleto gerado via Mendes Connexions"
       ],
       key: {
         type: "CNPJ",
-        dictKey: SANTANDER_CONFIG.DICT_KEY
+        dictKey: SANTANDER_CONFIG.DICT_KEY.replace(/[^0-9]/g, '')
       }
     };
 
-    console.log("📦 Payload Boleto:", JSON.stringify(payload, null, 2));
+    console.log("📦 Payload Boleto Corrigido:", JSON.stringify(payload, null, 2));
+
+    // Validações adicionais
+    if (payload.payer.documentNumber.length !== 14) {
+      console.warn("⚠️ CNPJ do pagador com tamanho inválido:", payload.payer.documentNumber);
+    }
+    
+    if (payload.key.dictKey.length !== 14) {
+      console.warn("⚠️ DICT_KEY com tamanho inválido:", payload.key.dictKey);
+    }
 
     const httpsAgent = createHttpsAgent();
     if (!httpsAgent) {
@@ -590,6 +599,7 @@ app.post('/api/santander/boletos', async (req, res) => {
     );
 
     console.log("✅ Boleto registrado com sucesso!");
+    console.log("📋 Resposta:", JSON.stringify(boletoResponse.data, null, 2));
 
     res.json({
       success: true,
@@ -597,6 +607,7 @@ app.post('/api/santander/boletos', async (req, res) => {
       boletoId: boletoResponse.data.nsuCode,
       bankNumber: bankNumber,
       workspaceId: workspaceId,
+      digitableLine: boletoResponse.data.digitableLine,
       data: boletoResponse.data
     });
 
@@ -607,6 +618,12 @@ app.post('/api/santander/boletos', async (req, res) => {
       data: error.response?.data,
       stack: error.stack
     });
+
+    // Log detalhado do erro do Santander
+    if (error.response?.data?._errors) {
+      console.error("📋 Detalhes do erro Santander:", 
+        JSON.stringify(error.response.data._errors, null, 2));
+    }
 
     const statusCode = error.response?.status || 500;
     const errorDetails = error.response?.data || error.message;
@@ -645,7 +662,7 @@ app.post('/api/santander/boletos/pdf', async (req, res) => {
     const url = `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`;
 
     const payload = {
-      payerDocumentNumber: payerDocumentNumber.toString()
+      payerDocumentNumber: payerDocumentNumber.toString().replace(/[^0-9]/g, '')
     };
 
     console.log("➡️ Payload PDF:", JSON.stringify(payload, null, 2));
@@ -866,6 +883,85 @@ app.get('/api/download-boleto/:pontuacaoId', authenticateFirebase, async (req, r
     console.error('❌ Erro no download via backend:', error);
     res.status(500).json({
       error: 'Erro ao baixar PDF: ' + error.message
+    });
+  }
+});
+
+// =============================================
+// ROTA: DOWNLOAD DIRETO DO PDF
+// =============================================
+app.get('/api/cloudinary/download-pdf', authenticateFirebase, async (req, res) => {
+  try {
+    const { publicId, fileName = 'boleto.pdf' } = req.query;
+    
+    if (!publicId) {
+      return res.status(400).json({
+        error: 'publicId é obrigatório'
+      });
+    }
+
+    console.log('⬇️ Iniciando download direto do PDF:', publicId);
+    
+    const downloadUrl = `https://res.cloudinary.com/dno43pc3o/raw/upload/fl_attachment:${fileName}/${publicId}`;
+    
+    console.log('🔗 URL de download:', downloadUrl);
+    
+    const response = await fetch(downloadUrl);
+    
+    if (!response.ok) {
+      throw new Error(`Erro ao baixar PDF do Cloudinary: ${response.status}`);
+    }
+    
+    const pdfBuffer = await response.buffer();
+    
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    res.setHeader('Cache-Control', 'no-cache');
+    
+    console.log('✅ PDF pronto para download:', {
+      tamanho: pdfBuffer.length,
+      fileName: fileName
+    });
+    
+    res.send(pdfBuffer);
+    
+  } catch (error) {
+    console.error('❌ Erro no download do PDF:', error);
+    res.status(500).json({
+      error: 'Erro ao baixar PDF: ' + error.message
+    });
+  }
+});
+
+// =============================================
+// ROTA: GERAR URL DE DOWNLOAD
+// =============================================
+app.get('/api/cloudinary/download-url', authenticateFirebase, async (req, res) => {
+  try {
+    const { publicId, fileName = 'boleto.pdf' } = req.query;
+    
+    if (!publicId) {
+      return res.status(400).json({
+        error: 'publicId é obrigatório'
+      });
+    }
+
+    const downloadUrl = `https://res.cloudinary.com/dno43pc3o/raw/upload/fl_attachment:${fileName}/${publicId}`;
+    
+    console.log('🔗 Gerando URL de download:', downloadUrl);
+    
+    res.json({
+      success: true,
+      downloadUrl: downloadUrl,
+      fileName: fileName,
+      message: 'URL de download gerada com sucesso'
+    });
+    
+  } catch (error) {
+    console.error('❌ Erro ao gerar URL de download:', error);
+    res.status(500).json({
+      error: 'Erro ao gerar URL de download: ' + error.message
     });
   }
 });
