@@ -468,38 +468,26 @@ async function gerarNSU(clientNumber) {
 }
 
 // =============================================
-// FUNÇÃO: GERAR bankNumber
+// FUNÇÃO: GERAR BANK NUMBER (BASEADO NO NSU)
 // =============================================
-async function gerarBankNumber() {
-  if (!db) {
-    console.error('❌ Firestore não inicializado');
-    return "0040";
-  }
-
+function gerarBankNumber(nsuCode, clientNumber) {
   try {
-    const ref = db.collection('config').doc('ultimoBankNumber');
-    const doc = await ref.get();
-    let ultimo = 39;
-
-    if (doc.exists && doc.data()?.value) {
-      ultimo = parseInt(doc.data().value);
-    }
-
-    const novoBankNumber = ultimo + 1;
-    await ref.set({ value: novoBankNumber });
-
-    const bankNumberStr = String(novoBankNumber).padStart(4, '0');
-    console.log(`🏦 BankNumber gerado: ${bankNumberStr}`);
-
-    return bankNumberStr;
+    // Usa os últimos 4 dígitos do NSU + clientNumber com 3 dígitos
+    const ultimos4 = nsuCode.slice(-4);
+    const clientPadded = String(clientNumber).padStart(3, '0');
+    const bankNumber = `${ultimos4}${clientPadded}`;
+    
+    console.log(`🏦 BankNumber gerado: ${bankNumber} (NSU: ${nsuCode}, Cliente: ${clientNumber})`);
+    return bankNumber;
   } catch (error) {
     console.error('❌ Erro ao gerar bankNumber:', error);
-    return "0040";
+    // Fallback: timestamp único
+    return Date.now().toString().slice(-7);
   }
 }
 
 // =============================================
-// ROTA: REGISTRAR BOLETO (VERSÃO CORRIGIDA)
+// ROTA: REGISTRAR BOLETO (VERSÃO FINAL CORRIGIDA)
 // =============================================
 app.post('/api/santander/boletos', async (req, res) => {
   console.log("📥 Recebendo requisição para gerar boleto...");
@@ -523,8 +511,10 @@ app.post('/api/santander/boletos', async (req, res) => {
 
     const accessToken = await obterTokenSantander();
     const workspaceId = await criarWorkspace(accessToken);
-    const bankNumber = await gerarBankNumber();
     const nsuCode = await gerarNSU(clientNumber);
+    
+    // BankNumber baseado no NSU para garantir unicidade
+    const bankNumber = gerarBankNumber(nsuCode, clientNumber);
 
     console.log("\n=== [3] Registrando BOLETO ===");
 
@@ -532,7 +522,6 @@ app.post('/api/santander/boletos', async (req, res) => {
     const nsuDate = gerarDataAtual();
     const issueDate = gerarDataAtual();
 
-    // Payload corrigido com base no erro Altair
     const payload = {
       environment: "PRODUCAO",
       nsuCode: nsuCode,
@@ -568,15 +557,6 @@ app.post('/api/santander/boletos', async (req, res) => {
     };
 
     console.log("📦 Payload Boleto Corrigido:", JSON.stringify(payload, null, 2));
-
-    // Validações adicionais
-    if (payload.payer.documentNumber.length !== 14) {
-      console.warn("⚠️ CNPJ do pagador com tamanho inválido:", payload.payer.documentNumber);
-    }
-    
-    if (payload.key.dictKey.length !== 14) {
-      console.warn("⚠️ DICT_KEY com tamanho inválido:", payload.key.dictKey);
-    }
 
     const httpsAgent = createHttpsAgent();
     if (!httpsAgent) {
@@ -619,7 +599,6 @@ app.post('/api/santander/boletos', async (req, res) => {
       stack: error.stack
     });
 
-    // Log detalhado do erro do Santander
     if (error.response?.data?._errors) {
       console.error("📋 Detalhes do erro Santander:", 
         JSON.stringify(error.response.data._errors, null, 2));
