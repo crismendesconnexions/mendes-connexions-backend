@@ -19,7 +19,7 @@ app.use(helmet({
 app.disable('x-powered-by');
 
 // =============================================
-// CONFIGURAÇÃO CORS ATUALIZADA (SUPORTE FLUTTER WEB)
+// CONFIGURAÇÃO CORS ATUALIZADA
 // =============================================
 const allowedOrigins = [
   'https://mendesconnexions.com.br',
@@ -37,7 +37,6 @@ const allowedOrigins = [
 const corsOptions = {
   origin: function (origin, callback) {
     if (!origin) {
-      console.log('✅ Requisição sem origin - permitida');
       return callback(null, true);
     }
     
@@ -179,8 +178,7 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     service: 'Mendes Connexions Backend',
     environment: process.env.NODE_ENV || 'development',
-    port: process.env.PORT || 10000,
-    uptime: `${process.uptime().toFixed(2)} segundos`,
+    mode: process.env.USE_MOCK === 'true' ? 'MOCK' : 'REAL',
     firebase: !!admin.apps.length
   });
 });
@@ -190,7 +188,7 @@ app.get('/test', (req, res) => {
     success: true,
     message: 'Backend está funcionando!',
     timestamp: new Date().toISOString(),
-    cors: req.headers.origin ? 'permitido' : 'qualquer'
+    mode: process.env.USE_MOCK === 'true' ? 'MOCK' : 'REAL'
   });
 });
 
@@ -198,56 +196,17 @@ app.get('/api/debug-env', (req, res) => {
   const cert = process.env.SANTANDER_CERTIFICATE_CRT_B64 || '';
   const key = process.env.SANTANDER_PRIVATE_KEY_B64 || '';
   
-  let decodedCert = '';
-  try {
-    decodedCert = cert.includes('BEGIN') ? cert : Buffer.from(cert, 'base64').toString('utf-8').substring(0, 100);
-  } catch (e) { decodedCert = 'Erro ao decodificar'; }
-
   res.json({
     hasCert: !!cert,
     hasKey: !!key,
     certLength: cert.length,
     keyLength: key.length,
-    isBase64: !cert.includes('BEGIN'),
-    certPreview: decodedCert.substring(0, 50) + ' ...',
-    envVarLooksLike: cert.substring(0, 20)
+    mode: process.env.USE_MOCK === 'true' ? 'MOCK' : 'REAL'
   });
 });
 
-app.get('/api/test-cert', (req, res) => {
-  try {
-    const certRaw = process.env.SANTANDER_CERTIFICATE_CRT_B64;
-    const keyRaw = process.env.SANTANDER_PRIVATE_KEY_B64;
-    
-    const certPreview = certRaw ? certRaw.substring(0, 100) + '...' : 'não definido';
-    const keyPreview = keyRaw ? keyRaw.substring(0, 100) + '...' : 'não definido';
-    
-    const agent = createHttpsAgent();
-    
-    res.json({
-      certificado: {
-        definido: !!certRaw,
-        tamanho: certRaw?.length || 0,
-        preview: certPreview,
-        comecaComBegin: certRaw?.includes('BEGIN') || false
-      },
-      chave: {
-        definido: !!keyRaw,
-        tamanho: keyRaw?.length || 0,
-        preview: keyPreview,
-        comecaComBegin: keyRaw?.includes('BEGIN') || false
-      },
-      agenteCriado: !!agent
-    });
-  } catch (error) {
-    res.status(500).json({
-      error: error.message
-    });
-  }
-});
-
 // =============================================
-// AGENTE HTTPS SANTANDER (VERSÃO CORRIGIDA)
+// AGENTE HTTPS SANTANDER
 // =============================================
 function createHttpsAgent() {
   try {
@@ -256,12 +215,9 @@ function createHttpsAgent() {
     const passphrase = process.env.SANTANDER_CERT_PASSWORD || undefined;
 
     if (!certRaw || !keyRaw) {
-      console.error('❌ [MTLS] Faltam variáveis de ambiente');
+      console.error('❌ [MTLS] Faltam variáveis de ambiente para certificado');
       return null;
     }
-
-    console.log('🔍 Debug - Certificado (primeiros 50 chars):', certRaw.substring(0, 50));
-    console.log('🔍 Debug - Chave (primeiros 50 chars):', keyRaw.substring(0, 50));
 
     const cleanPEM = (raw) => {
       if (raw.includes('-----BEGIN')) {
@@ -284,8 +240,8 @@ function createHttpsAgent() {
     const cert = cleanPEM(certRaw);
     const key = cleanPEM(keyRaw);
 
-    console.log('✅ Certificado limpo:', cert.split('\n')[0] + '...' + cert.split('\n').slice(-1)[0]);
-    console.log('✅ Chave limpa:', key.split('\n')[0] + '...' + key.split('\n').slice(-1)[0]);
+    console.log('✅ Certificado carregado');
+    console.log('✅ Chave carregada');
 
     const agentOptions = {
       cert: cert,
@@ -359,16 +315,14 @@ async function buscarClientNumber(lojistaId) {
     const data = lojistaDoc.data();
     const clientNumber = data.clientNumber || data.idNumber;
 
-    console.log('📋 Dados do lojista encontrado:', {
-      exists: lojistaDoc.exists,
+    console.log('📋 Dados do lojista:', {
       clientNumber,
-      nome: data.nomeFantasia || data.nome,
-      cnpj: data.cnpj
+      nome: data.nomeFantasia || data.nome
     });
 
     return clientNumber?.toString() || null;
   } catch (error) {
-    console.error('💥 Erro ao buscar clientNumber no Firebase:', error);
+    console.error('💥 Erro ao buscar clientNumber:', error);
     return null;
   }
 }
@@ -388,9 +342,7 @@ async function obterTokenSantander() {
 
   try {
     const httpsAgent = createHttpsAgent();
-    if (!httpsAgent) throw new Error('Agente HTTPS não pôde ser criado (verifique certificados)');
-
-    console.log('🔧 Agente HTTPS criado com sucesso');
+    if (!httpsAgent) throw new Error('Agente HTTPS não pôde ser criado');
 
     const response = await axios.post(
       'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
@@ -398,8 +350,7 @@ async function obterTokenSantander() {
       {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': 'MendesConnexions/1.0',
-          'Accept': '*/*'
+          'User-Agent': 'MendesConnexions/1.0'
         },
         httpsAgent,
         timeout: 30000
@@ -409,18 +360,7 @@ async function obterTokenSantander() {
     console.log("✅ Token recebido com sucesso");
     return response.data.access_token;
   } catch (err) {
-    console.error("❌ Erro ao obter token Santander:", {
-      tipo: err.code === 'ECONNRESET' ? 'ERRO DE CERTIFICADO' : 'ERRO DE DADOS',
-      status: err.response?.status,
-      data: err.response?.data,
-      message: err.message,
-      code: err.code
-    });
-    
-    if (err.code === 'ECONNRESET' || err.message.includes('certificate')) {
-      console.error('🔍 PROVÁVEL PROBLEMA COM O CERTIFICADO - Verifique se o Base64 está correto');
-    }
-    
+    console.error("❌ Erro ao obter token:", err.message);
     throw err;
   }
 }
@@ -434,12 +374,8 @@ async function criarWorkspace(accessToken) {
   const payload = {
     type: "BILLING",
     description: "Workspace de Cobrança",
-    covenants: [
-      { code: SANTANDER_CONFIG.COVENANT_CODE }
-    ]
+    covenants: [{ code: SANTANDER_CONFIG.COVENANT_CODE }]
   };
-
-  console.log("➡️ Payload Workspace:", JSON.stringify(payload, null, 2));
 
   try {
     const httpsAgent = createHttpsAgent();
@@ -452,8 +388,7 @@ async function criarWorkspace(accessToken) {
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${accessToken}`,
-          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
-          'Accept': 'application/json'
+          'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID
         },
         httpsAgent,
         timeout: 30000
@@ -463,11 +398,7 @@ async function criarWorkspace(accessToken) {
     console.log("✅ Workspace criada:", response.data.id);
     return response.data.id;
   } catch (error) {
-    console.error("❌ Erro ao criar workspace:", {
-      status: error.response?.status,
-      data: error.response?.data,
-      message: error.message
-    });
+    console.error("❌ Erro ao criar workspace:", error.message);
     throw error;
   }
 }
@@ -486,7 +417,6 @@ async function gerarNSU(clientNumber) {
   const SS = String(agoraSP.getSeconds()).padStart(2, '0');
 
   if (!db) {
-    console.error('❌ Firestore não inicializado para gerar NSU');
     return `${YY}${MM}${DD}${HH}${min}${SS}001`;
   }
 
@@ -517,21 +447,13 @@ async function gerarNSU(clientNumber) {
 // FUNÇÃO: GERAR BANK NUMBER
 // =============================================
 function gerarBankNumber(nsuCode, clientNumber) {
-  try {
-    const ultimos4 = nsuCode.slice(-4);
-    const clientPadded = String(clientNumber).padStart(3, '0');
-    const bankNumber = `${ultimos4}${clientPadded}`;
-    
-    console.log(`🏦 BankNumber gerado: ${bankNumber} (NSU: ${nsuCode}, Cliente: ${clientNumber})`);
-    return bankNumber;
-  } catch (error) {
-    console.error('❌ Erro ao gerar bankNumber:', error);
-    return Date.now().toString().slice(-7);
-  }
+  const ultimos4 = nsuCode.slice(-4);
+  const clientPadded = String(clientNumber).padStart(3, '0');
+  return `${ultimos4}${clientPadded}`;
 }
 
 // =============================================
-// ROTA: REGISTRAR BOLETO (COM MOCK PARA TESTE)
+// ROTA: REGISTRAR BOLETO (MODO REAL)
 // =============================================
 app.post('/api/santander/boletos', async (req, res) => {
   console.log("📥 Recebendo requisição para gerar boleto...");
@@ -539,50 +461,28 @@ app.post('/api/santander/boletos', async (req, res) => {
   const { dadosBoleto, lojistaId } = req.body;
   if (!dadosBoleto || !lojistaId) {
     return res.status(400).json({
-      error: 'Dados do boleto ou ID do lojista não fornecidos',
-      details: 'Verifique se dadosBoleto e lojistaId estão presentes no corpo da requisição'
-    });
-  }
-
-  // MODO MOCK para testes sem certificado
-  const USE_MOCK = process.env.USE_MOCK === 'true' || true;
-  
-  if (USE_MOCK) {
-    console.log('🔧 Usando MOCK para boleto (modo desenvolvimento)');
-    
-    const mockBoletoId = `MOCK-${Date.now()}`;
-    const mockDigitableLine = '23793.38128 60011.827468 12345.678902 1 12340000012345';
-    const mockQrCodePix = `00020126360014br.gov.bcb.pix0114+5511999999999520400005303986540.005802BR5913${(dadosBoleto.pagadorNome || 'Loja Teste').substring(0, 20)}6009SAO PAULO62070503***6304E2C8`;
-    
-    return res.json({
-      success: true,
-      data: {
-        boletoId: mockBoletoId,
-        digitableLine: mockDigitableLine,
-        barCode: mockDigitableLine.replace(/\s/g, ''),
-        nsuCode: `MOCK${Date.now()}`,
-        qrCodePix: mockQrCodePix,
-        dueDate: calcularCincoDiasUteis()
-      },
-      message: 'Boleto gerado em modo MOCK (teste)'
+      error: 'Dados do boleto ou ID do lojista não fornecidos'
     });
   }
 
   try {
+    // Buscar clientNumber do lojista
     const clientNumber = await buscarClientNumber(lojistaId);
     if (!clientNumber) {
       return res.status(400).json({
-        error: 'ClientNumber do lojista não encontrado',
-        details: `Lojista ${lojistaId} não possui clientNumber cadastrado no Firebase`
+        error: 'ClientNumber do lojista não encontrado'
       });
     }
 
+    // Obter token de acesso
     const accessToken = await obterTokenSantander();
+    
+    // Criar workspace
     const workspaceId = await criarWorkspace(accessToken);
+    
+    // Gerar NSU
     const nsuCode = await gerarNSU(clientNumber);
     const bankNumber = gerarBankNumber(nsuCode, clientNumber);
-
-    console.log("\n=== [3] Registrando BOLETO ===");
 
     const dueDate = calcularCincoDiasUteis();
     const nsuDate = gerarDataAtual();
@@ -620,7 +520,7 @@ app.post('/api/santander/boletos', async (req, res) => {
       }
     };
 
-    console.log("📦 Payload Boleto:", JSON.stringify(payload, null, 2));
+    console.log("📦 Enviando para Santander...");
 
     const httpsAgent = createHttpsAgent();
     if (!httpsAgent) {
@@ -634,8 +534,7 @@ app.post('/api/santander/boletos', async (req, res) => {
         headers: {
           'Content-Type': 'application/json',
           'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
-          'Authorization': `Bearer ${accessToken}`,
-          'Accept': 'application/json'
+          'Authorization': `Bearer ${accessToken}`
         },
         httpsAgent,
         timeout: 30000
@@ -643,32 +542,21 @@ app.post('/api/santander/boletos', async (req, res) => {
     );
 
     console.log("✅ Boleto registrado com sucesso!");
-    console.log("📋 Resposta:", JSON.stringify(boletoResponse.data, null, 2));
 
     res.json({
       success: true,
       message: 'Boleto registrado com sucesso',
       boletoId: boletoResponse.data.nsuCode,
-      bankNumber: bankNumber,
-      workspaceId: workspaceId,
       digitableLine: boletoResponse.data.digitableLine,
       data: boletoResponse.data
     });
 
   } catch (error) {
-    console.error("❌ Erro no fluxo Santander:", {
-      message: error.message,
-      status: error.response?.status,
-      data: error.response?.data,
-      stack: error.stack
-    });
-
-    const statusCode = error.response?.status || 500;
-    const errorDetails = error.response?.data || error.message;
-
-    res.status(statusCode).json({
+    console.error("❌ Erro no fluxo Santander:", error.message);
+    
+    res.status(500).json({
       error: 'Falha no processo Santander',
-      details: errorDetails,
+      details: error.message,
       step: 'registro_boleto',
       timestamp: new Date().toISOString()
     });
@@ -676,7 +564,7 @@ app.post('/api/santander/boletos', async (req, res) => {
 });
 
 // =============================================
-// ROTA: BAIXAR PDF DO BOLETO (COM MOCK)
+// ROTA: BAIXAR PDF DO BOLETO
 // =============================================
 app.post('/api/santander/boletos/pdf', async (req, res) => {
   console.log("📥 Recebendo requisição para baixar PDF do boleto...");
@@ -684,19 +572,7 @@ app.post('/api/santander/boletos/pdf', async (req, res) => {
   const { digitableLine, payerDocumentNumber } = req.body;
   if (!digitableLine || !payerDocumentNumber) {
     return res.status(400).json({
-      error: "Dados incompletos",
-      details: "É necessário informar 'digitableLine' e 'payerDocumentNumber'"
-    });
-  }
-
-  const USE_MOCK = process.env.USE_MOCK === 'true' || true;
-  
-  if (USE_MOCK) {
-    console.log('🔧 Usando MOCK para PDF (modo desenvolvimento)');
-    return res.json({
-      success: true,
-      link: `https://example.com/boleto-${Date.now()}.pdf`,
-      message: 'PDF gerado em modo MOCK'
+      error: "Dados incompletos"
     });
   }
 
@@ -714,15 +590,11 @@ app.post('/api/santander/boletos/pdf', async (req, res) => {
       payerDocumentNumber: payerDocumentNumber.toString().replace(/[^0-9]/g, '')
     };
 
-    console.log("➡️ Payload PDF:", JSON.stringify(payload, null, 2));
-    console.log("➡️ URL:", url);
-
     const response = await axios.post(url, payload, {
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${accessToken}`,
-        "X-Application-Key": SANTANDER_CONFIG.CLIENT_ID,
-        "Accept": "application/json"
+        "X-Application-Key": SANTANDER_CONFIG.CLIENT_ID
       },
       httpsAgent,
       timeout: 30000
@@ -731,34 +603,22 @@ app.post('/api/santander/boletos/pdf', async (req, res) => {
     const link = response.data?.link || response.data?.url;
 
     if (!link) {
-      console.error("⚠️ Nenhum link retornado pelo Santander:", response.data);
-      return res.status(500).json({
-        error: "Resposta do Santander não contém link do PDF",
-        rawResponse: response.data
-      });
+      throw new Error('Link do PDF não encontrado');
     }
 
-    console.log("✅ PDF gerado com sucesso! Link:", link);
+    console.log("✅ PDF gerado com sucesso!");
 
     res.json({
       success: true,
-      message: "PDF gerado com sucesso",
       link: link,
       digitableLine: digitableLine
     });
 
   } catch (error) {
-    console.error("❌ Erro ao gerar PDF do boleto:", {
-      message: error.message,
-      status: error.response?.status,
-      data: error.response?.data
-    });
-
+    console.error("❌ Erro ao gerar PDF:", error.message);
     res.status(500).json({
       error: "Falha ao gerar PDF do boleto",
-      details: error.response?.data || error.message,
-      step: "gerar_pdf",
-      timestamp: new Date().toISOString()
+      details: error.message
     });
   }
 });
@@ -770,34 +630,24 @@ app.post('/api/cloudinary/upload-pdf', authenticateFirebase, async (req, res) =>
   try {
     const { pdfUrl, fileName, boletoId } = req.body;
 
-    console.log('☁️ Iniciando upload para Cloudinary via backend...');
+    console.log('☁️ Iniciando upload para Cloudinary...');
 
     if (!pdfUrl || !fileName) {
       return res.status(400).json({
-        error: 'Dados incompletos',
-        details: 'pdfUrl e fileName são obrigatórios'
+        error: 'Dados incompletos'
       });
     }
 
-    const USE_MOCK = process.env.USE_MOCK === 'true' || true;
-    
-    if (USE_MOCK) {
-      console.log('🔧 Usando MOCK para Cloudinary (modo desenvolvimento)');
-      return res.json({
-        success: true,
-        cloudinaryUrl: `https://res.cloudinary.com/demo/raw/upload/v1/${fileName}`,
-        message: 'Upload realizado em modo MOCK'
-      });
-    }
-
+    // Baixar PDF da URL
     const pdfResponse = await fetch(pdfUrl);
     if (!pdfResponse.ok) {
       throw new Error(`Erro ao baixar PDF: ${pdfResponse.status}`);
     }
 
     const pdfBlob = await pdfResponse.blob();
-    console.log(`✅ PDF baixado com sucesso. Tamanho: ${pdfBlob.size} bytes`);
+    console.log(`✅ PDF baixado: ${pdfBlob.size} bytes`);
 
+    // Upload para Cloudinary
     const formData = new FormData();
     formData.append('file', pdfBlob, fileName);
     formData.append('upload_preset', 'boletos');
@@ -810,37 +660,31 @@ app.post('/api/cloudinary/upload-pdf', authenticateFirebase, async (req, res) =>
 
     if (!cloudinaryResponse.ok) {
       const errorData = await cloudinaryResponse.json();
-      throw new Error(errorData.error?.message || 'Erro ao fazer upload para Cloudinary');
+      throw new Error(errorData.error?.message || 'Erro no upload');
     }
 
     const cloudinaryData = await cloudinaryResponse.json();
 
-    console.log('✅ Upload para Cloudinary realizado com sucesso:', cloudinaryData.secure_url);
+    console.log('✅ Upload Cloudinary realizado:', cloudinaryData.secure_url);
 
     if (boletoId && db) {
-      try {
-        await db.collection('boletos').doc(boletoId).update({
-          boletoViewUrl: cloudinaryData.secure_url,
-          boletoPublicId: cloudinaryData.public_id,
-          boletoUploadedAt: new Date().toISOString()
-        });
-        console.log('✅ URL do boleto salva no Firebase para boletoId:', boletoId);
-      } catch (firebaseError) {
-        console.error('⚠️ Erro ao salvar no Firebase, mas upload foi bem sucedido:', firebaseError);
-      }
+      await db.collection('boletos').doc(boletoId).update({
+        boletoViewUrl: cloudinaryData.secure_url,
+        boletoPublicId: cloudinaryData.public_id,
+        boletoUploadedAt: new Date().toISOString()
+      });
     }
 
     res.json({
       success: true,
       cloudinaryUrl: cloudinaryData.secure_url,
-      publicId: cloudinaryData.public_id,
-      message: 'Upload realizado com sucesso'
+      publicId: cloudinaryData.public_id
     });
 
   } catch (error) {
-    console.error('❌ Erro no upload para Cloudinary:', error);
+    console.error('❌ Erro no upload:', error.message);
     res.status(500).json({
-      error: 'Erro ao fazer upload para Cloudinary: ' + error.message
+      error: 'Erro ao fazer upload: ' + error.message
     });
   }
 });
@@ -853,21 +697,15 @@ app.get('/api/cloudinary/download-pdf', authenticateFirebase, async (req, res) =
     const { publicId, fileName = 'boleto.pdf' } = req.query;
     
     if (!publicId) {
-      return res.status(400).json({
-        error: 'publicId é obrigatório'
-      });
+      return res.status(400).json({ error: 'publicId é obrigatório' });
     }
 
-    console.log('⬇️ Iniciando download direto do PDF:', publicId);
-    
     const downloadUrl = `https://res.cloudinary.com/dno43pc3o/raw/upload/fl_attachment:${fileName}/${publicId}`;
-    
-    console.log('🔗 URL de download:', downloadUrl);
     
     const response = await fetch(downloadUrl);
     
     if (!response.ok) {
-      throw new Error(`Erro ao baixar PDF do Cloudinary: ${response.status}`);
+      throw new Error(`Erro ao baixar PDF: ${response.status}`);
     }
     
     const pdfBuffer = await response.buffer();
@@ -875,77 +713,13 @@ app.get('/api/cloudinary/download-pdf', authenticateFirebase, async (req, res) =
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.setHeader('Content-Length', pdfBuffer.length);
-    res.setHeader('Cache-Control', 'no-cache');
-    
-    console.log('✅ PDF pronto para download:', {
-      tamanho: pdfBuffer.length,
-      fileName: fileName
-    });
     
     res.send(pdfBuffer);
     
   } catch (error) {
-    console.error('❌ Erro no download do PDF:', error);
-    res.status(500).json({
-      error: 'Erro ao baixar PDF: ' + error.message
-    });
+    console.error('❌ Erro no download:', error.message);
+    res.status(500).json({ error: 'Erro ao baixar PDF: ' + error.message });
   }
-});
-
-// =============================================
-// ROTA: GERAR URL DE DOWNLOAD
-// =============================================
-app.get('/api/cloudinary/download-url', authenticateFirebase, async (req, res) => {
-  try {
-    const { publicId, fileName = 'boleto.pdf' } = req.query;
-    
-    if (!publicId) {
-      return res.status(400).json({
-        error: 'publicId é obrigatório'
-      });
-    }
-
-    const downloadUrl = `https://res.cloudinary.com/dno43pc3o/raw/upload/fl_attachment:${fileName}/${publicId}`;
-    
-    console.log('🔗 Gerando URL de download:', downloadUrl);
-    
-    res.json({
-      success: true,
-      downloadUrl: downloadUrl,
-      fileName: fileName,
-      message: 'URL de download gerada com sucesso'
-    });
-    
-  } catch (error) {
-    console.error('❌ Erro ao gerar URL de download:', error);
-    res.status(500).json({
-      error: 'Erro ao gerar URL de download: ' + error.message
-    });
-  }
-});
-
-// =============================================
-// MIDDLEWARE DE ERRO GLOBAL
-// =============================================
-app.use((error, req, res, next) => {
-  console.error('💥 Erro não tratado:', error);
-  res.status(500).json({
-    error: 'Erro interno do servidor',
-    message: error.message,
-    timestamp: new Date().toISOString()
-  });
-});
-
-// =============================================
-// ROTA 404
-// =============================================
-app.use('*', (req, res) => {
-  res.status(404).json({
-    error: 'Rota não encontrada',
-    path: req.originalUrl,
-    method: req.method,
-    timestamp: new Date().toISOString()
-  });
 });
 
 // =============================================
@@ -957,9 +731,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('🚀 Servidor Mendes Connexions Backend');
   console.log('====================================================');
   console.log('📍 Porta:', PORT);
-  console.log('🌍 Ambiente:', process.env.NODE_ENV || 'development');
-  console.log('🏥 Health check: http://0.0.0.0:' + PORT + '/health');
-  console.log('✅ Servidor rodando com sucesso!');
-  console.log('📋 Modo MOCK:', process.env.USE_MOCK === 'true' ? 'ATIVADO' : 'DESATIVADO');
+  console.log('✅ Modo REAL ativado');
   console.log('====================================================\n');
 });
