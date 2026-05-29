@@ -785,8 +785,13 @@ app.delete('/api/santander/boletos/:nsuCode', authenticateFirebase, async (req, 
       }
     }
 
+    console.log(`🔍 Dados encontrados para cancelamento:`, {
+      workspaceId,
+      santanderInternalId,
+      nsuCode
+    });
+
     if (!workspaceId) {
-      // Sem workspace: não é possível cancelar no Santander, apenas limpar Firebase
       console.warn(`⚠️ workspaceId não encontrado para NSU ${nsuCode} — cancelamento local apenas`);
       return res.json({
         success: true,
@@ -795,23 +800,52 @@ app.delete('/api/santander/boletos/:nsuCode', authenticateFirebase, async (req, 
       });
     }
 
-    // Monta a URL de cancelamento
-    // Usa santanderInternalId se disponível, senão tenta pelo nsuCode (pode falhar)
-    const bankSlipRef = santanderInternalId || nsuCode;
-    const cancelUrl   = `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips/${bankSlipRef}`;
-    console.log(`➡️ DELETE Santander: ${cancelUrl}`);
+    if (!santanderInternalId) {
+      console.warn(`⚠️ santanderInternalId não encontrado para NSU ${nsuCode} — impossível cancelar no Santander`);
+      return res.json({
+        success: true,
+        message: 'ID interno do Santander não encontrado — cancelado apenas localmente. Cancele manualmente no portal.',
+        localOnly: true,
+        workspaceId,
+        nsuCode
+      });
+    }
 
-    await axios.delete(cancelUrl, {
-      headers: {
-        'Authorization':    `Bearer ${accessToken}`,
-        'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
-        'Accept':            'application/json'
-      },
-      httpsAgent,
-      timeout: 30000
-    });
+    const baseCancel = `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips/${santanderInternalId}`;
+    const headers = {
+      'Authorization':     `Bearer ${accessToken}`,
+      'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+      'Content-Type':      'application/json',
+      'Accept':            'application/json'
+    };
 
-    console.log(`✅ Boleto ${nsuCode} cancelado no Santander`);
+    // Tenta DELETE primeiro
+    let cancelado = false;
+    try {
+      console.log(`➡️ DELETE Santander: ${baseCancel}`);
+      await axios.delete(baseCancel, { headers, httpsAgent, timeout: 30000 });
+      cancelado = true;
+      console.log(`✅ Boleto ${nsuCode} cancelado via DELETE`);
+    } catch (deleteErr) {
+      const delStatus = deleteErr.response?.status;
+      const delData   = deleteErr.response?.data;
+      console.warn(`⚠️ DELETE falhou (${delStatus}):`, JSON.stringify(delData));
+
+      // Tenta PATCH com situation=CANCELLED como fallback
+      try {
+        console.log(`➡️ Tentando PATCH com situation=CANCELLED: ${baseCancel}`);
+        await axios.patch(baseCancel, { situation: 'CANCELLED' }, { headers, httpsAgent, timeout: 30000 });
+        cancelado = true;
+        console.log(`✅ Boleto ${nsuCode} cancelado via PATCH`);
+      } catch (patchErr) {
+        const patchStatus = patchErr.response?.status;
+        const patchData   = patchErr.response?.data;
+        console.error(`❌ PATCH também falhou (${patchStatus}):`, JSON.stringify(patchData));
+        throw new Error(`DELETE: ${JSON.stringify(delData)} | PATCH: ${JSON.stringify(patchData)}`);
+      }
+    }
+
+    console.log(`✅ Boleto ${nsuCode} cancelado no Santander (cancelado=${cancelado})`);
 
     // Remove entrada da coleção santanderWorkspaces
     if (db) {
