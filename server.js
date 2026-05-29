@@ -740,6 +740,111 @@ app.get('/api/santander/boletos/:nsuCode', async (req, res) => {
   }
 });
 // =============================================
+// ROTA: CANCELAR BOLETO NO SANTANDER
+// =============================================
+app.delete('/api/santander/boletos/:nsuCode', authenticateFirebase, async (req, res) => {
+  const { nsuCode } = req.params;
+  console.log(`🗑 Cancelando boleto NSU: ${nsuCode}`);
+
+  if (!nsuCode || !/^\d+$/.test(nsuCode)) {
+    return res.status(400).json({ error: 'NSU inválido', nsuCode });
+  }
+
+  try {
+    const accessToken = await obterTokenSantander();
+    const httpsAgent  = createHttpsAgent();
+    if (!httpsAgent) throw new Error('Agente HTTPS não disponível');
+
+    // Busca workspaceId + santanderInternalId no Firestore
+    let workspaceId        = null;
+    let santanderInternalId = null;
+
+    if (db) {
+      try {
+        const wsDoc = await db.collection('santanderWorkspaces').doc(nsuCode).get();
+        if (wsDoc.exists) {
+          workspaceId         = wsDoc.data().workspaceId;
+          santanderInternalId = wsDoc.data().santanderInternalId || null;
+        }
+      } catch (e) {
+        console.warn('⚠️ Erro ao buscar workspace para cancelamento:', e.message);
+      }
+
+      if (!workspaceId) {
+        try {
+          let snap = await db.collection('boletos').where('nsu', '==', nsuCode).limit(1).get();
+          if (snap.empty) snap = await db.collection('boletos').where('boletoId', '==', nsuCode).limit(1).get();
+          if (!snap.empty) {
+            const bd = snap.docs[0].data();
+            workspaceId         = bd.workspaceId || bd.santanderWorkspaceId || null;
+            santanderInternalId = bd.santanderInternalId || null;
+          }
+        } catch (e) {
+          console.warn('⚠️ Erro ao buscar boleto para cancelamento:', e.message);
+        }
+      }
+    }
+
+    if (!workspaceId) {
+      // Sem workspace: não é possível cancelar no Santander, apenas limpar Firebase
+      console.warn(`⚠️ workspaceId não encontrado para NSU ${nsuCode} — cancelamento local apenas`);
+      return res.json({
+        success: true,
+        message: 'Boleto sem workspace registrado — cancelado apenas localmente.',
+        localOnly: true
+      });
+    }
+
+    // Monta a URL de cancelamento
+    // Usa santanderInternalId se disponível, senão tenta pelo nsuCode (pode falhar)
+    const bankSlipRef = santanderInternalId || nsuCode;
+    const cancelUrl   = `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips/${bankSlipRef}`;
+    console.log(`➡️ DELETE Santander: ${cancelUrl}`);
+
+    await axios.delete(cancelUrl, {
+      headers: {
+        'Authorization':    `Bearer ${accessToken}`,
+        'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+        'Accept':            'application/json'
+      },
+      httpsAgent,
+      timeout: 30000
+    });
+
+    console.log(`✅ Boleto ${nsuCode} cancelado no Santander`);
+
+    // Remove entrada da coleção santanderWorkspaces
+    if (db) {
+      try {
+        await db.collection('santanderWorkspaces').doc(nsuCode).delete();
+      } catch (e) { /* não crítico */ }
+    }
+
+    res.json({ success: true, message: `Boleto ${nsuCode} cancelado com sucesso.` });
+
+  } catch (error) {
+    const httpStatus = error.response?.status;
+    const errorData  = error.response?.data;
+    console.error('❌ Erro ao cancelar boleto:', { nsuCode, httpStatus, data: errorData });
+
+    // 404 do Santander = boleto já cancelado ou não existe
+    if (httpStatus === 404) {
+      return res.json({
+        success: true,
+        message: 'Boleto não encontrado no Santander (já cancelado ou expirado).',
+        alreadyCancelled: true
+      });
+    }
+
+    res.status(500).json({
+      error:   'Falha ao cancelar boleto no Santander',
+      details: errorData || error.message,
+      nsuCode
+    });
+  }
+});
+
+// =============================================
 // ROTA: BAIXAR PDF DO BOLETO
 // =============================================
 app.post('/api/santander/boletos/pdf', async (req, res) => {
