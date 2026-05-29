@@ -461,20 +461,30 @@ app.post('/api/santander/boletos', async (req, res) => {
       }
     );
     console.log("✅ Boleto registrado com sucesso!");
+    console.log("📦 Resposta Santander (criação):", JSON.stringify(boletoResponse.data, null, 2));
 
-    // Persistir workspaceId + nsuCode no Firestore para consultas futuras
     const nsuRetornado = boletoResponse.data.nsuCode || nsuCode;
+    // ID interno do Santander — pode vir como id, bankSlipId, bankslipId, etc.
+    const santanderInternalId = boletoResponse.data.id
+      || boletoResponse.data.bankSlipId
+      || boletoResponse.data.bankslipId
+      || null;
+
+    // Persistir workspaceId + ID interno no Firestore para consultas futuras
     if (db && workspaceId && nsuRetornado) {
       try {
         await db.collection('santanderWorkspaces').doc(nsuRetornado).set({
           workspaceId: workspaceId,
           nsuCode: nsuRetornado,
+          santanderInternalId: santanderInternalId,
           lojistaId: lojistaId,
           criadoEm: new Date().toISOString()
         });
-        console.log(`💾 workspaceId salvo no Firestore para NSU ${nsuRetornado}`);
+        console.log(`💾 workspaceId + santanderInternalId salvos para NSU ${nsuRetornado}`);
+        console.log(`   workspaceId: ${workspaceId}`);
+        console.log(`   santanderInternalId: ${santanderInternalId}`);
       } catch (fsErr) {
-        console.warn('⚠️ Não foi possível salvar workspaceId no Firestore:', fsErr.message);
+        console.warn('⚠️ Não foi possível salvar no Firestore:', fsErr.message);
       }
     }
 
@@ -483,6 +493,7 @@ app.post('/api/santander/boletos', async (req, res) => {
       message: 'Boleto registrado com sucesso',
       boletoId: nsuRetornado,
       workspaceId: workspaceId,
+      santanderInternalId: santanderInternalId,
       digitableLine: boletoResponse.data.digitableLine,
       data: boletoResponse.data
     });
@@ -557,27 +568,81 @@ app.get('/api/santander/boletos/:nsuCode', async (req, res) => {
       }
     }
 
-    // ── 2. Se ainda não tem workspaceId, cria um novo (fallback) ──────────
+    // ── 2. Buscar também o ID interno do Santander (salvo na criação) ─────
+    let santanderInternalId = null;
+    if (db) {
+      try {
+        const wsDoc = await db.collection('santanderWorkspaces').doc(nsuCode).get();
+        if (wsDoc.exists) {
+          const wsData = wsDoc.data();
+          workspaceId = workspaceId || wsData.workspaceId;
+          santanderInternalId = wsData.santanderInternalId || null;
+        }
+      } catch (e) { /* já logado acima */ }
+    }
+
+    // ── 3. Se ainda não tem workspaceId, cria um novo como fallback ───────
     if (!workspaceId) {
       console.log('⚠️ workspaceId não encontrado — criando novo workspace como fallback');
       workspaceId = await criarWorkspace(accessToken);
     }
 
-    // ── 3. Consulta o boleto no Santander com workspace-scoped URL ─────────
-    const santanderUrl = `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips/${nsuCode}`;
-    console.log(`➡️ URL Santander: ${santanderUrl}`);
+    const baseUrl = `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips`;
+    const headers = {
+      'Authorization': `Bearer ${accessToken}`,
+      'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+      'Accept': 'application/json'
+    };
 
-    const response = await axios.get(santanderUrl, {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
-        'Accept': 'application/json'
-      },
-      httpsAgent,
-      timeout: 30000
-    });
+    let response;
 
-    console.log("✅ Boleto consultado. Situação:", response.data?.situation);
+    // ── 4a. Tenta GET por ID interno (UUID) se disponível ─────────────────
+    if (santanderInternalId) {
+      const urlById = `${baseUrl}/${santanderInternalId}`;
+      console.log(`➡️ Tentando por ID interno: ${urlById}`);
+      try {
+        response = await axios.get(urlById, { headers, httpsAgent, timeout: 30000 });
+        console.log("✅ Boleto encontrado por ID interno. Situação:", response.data?.situation);
+      } catch (e) {
+        console.warn(`⚠️ GET por ID interno falhou (${e.response?.status}), tentando listagem por NSU`);
+        response = null;
+      }
+    }
+
+    // ── 4b. Fallback: lista com filtro de NSU ─────────────────────────────
+    if (!response) {
+      console.log(`➡️ Listando bank_slips?nsuCode=${nsuCode} no workspace ${workspaceId}`);
+      const listResp = await axios.get(baseUrl, {
+        headers,
+        httpsAgent,
+        timeout: 30000,
+        params: { nsuCode: nsuCode }
+      });
+
+      console.log("📋 Listagem Santander:", JSON.stringify(listResp.data, null, 2));
+
+      // A resposta pode ser array ou objeto com campo items/data/bankSlips
+      const items = Array.isArray(listResp.data)
+        ? listResp.data
+        : (listResp.data?.items || listResp.data?.data || listResp.data?.bankSlips || []);
+
+      const match = items.find(b =>
+        b.nsuCode === nsuCode || b.nsu === nsuCode || b.bankSlipNsu === nsuCode
+      );
+
+      if (match) {
+        console.log("✅ Boleto encontrado na listagem. Situação:", match.situation);
+        return res.json({ success: true, message: 'Boleto encontrado', data: match });
+      }
+
+      // Se a lista veio vazia ou sem match, retorna o raw da listagem para diagnóstico
+      return res.status(404).json({
+        error: 'Boleto não encontrado na listagem do workspace',
+        details: 'O NSU não consta neste workspace — o boleto pode ter sido criado em outro contexto',
+        nsuCode,
+        listagem: listResp.data
+      });
+    }
 
     res.json({
       success: true,
