@@ -464,24 +464,28 @@ app.post('/api/santander/boletos', async (req, res) => {
     console.log("📦 Resposta Santander (criação):", JSON.stringify(boletoResponse.data, null, 2));
 
     const nsuRetornado = boletoResponse.data.nsuCode || nsuCode;
-    // ID interno do Santander — pode vir como id, bankSlipId, bankslipId, etc.
+    // Santander não retorna um campo "id" — usa txId ou nsuCode como identificador
+    const txId = boletoResponse.data.txId || null;
     const santanderInternalId = boletoResponse.data.id
       || boletoResponse.data.bankSlipId
       || boletoResponse.data.bankslipId
+      || txId
       || null;
 
-    // Persistir workspaceId + ID interno no Firestore para consultas futuras
+    // Persistir workspaceId + identificadores no Firestore para operações futuras
     if (db && workspaceId && nsuRetornado) {
       try {
         await db.collection('santanderWorkspaces').doc(nsuRetornado).set({
-          workspaceId: workspaceId,
-          nsuCode: nsuRetornado,
+          workspaceId:        workspaceId,
+          nsuCode:            nsuRetornado,
+          txId:               txId,
           santanderInternalId: santanderInternalId,
-          lojistaId: lojistaId,
-          criadoEm: new Date().toISOString()
+          lojistaId:          lojistaId,
+          criadoEm:           new Date().toISOString()
         });
-        console.log(`💾 workspaceId + santanderInternalId salvos para NSU ${nsuRetornado}`);
+        console.log(`💾 Dados salvos para NSU ${nsuRetornado}:`);
         console.log(`   workspaceId: ${workspaceId}`);
+        console.log(`   txId: ${txId}`);
         console.log(`   santanderInternalId: ${santanderInternalId}`);
       } catch (fsErr) {
         console.warn('⚠️ Não foi possível salvar no Firestore:', fsErr.message);
@@ -755,16 +759,19 @@ app.delete('/api/santander/boletos/:nsuCode', authenticateFirebase, async (req, 
     const httpsAgent  = createHttpsAgent();
     if (!httpsAgent) throw new Error('Agente HTTPS não disponível');
 
-    // Busca workspaceId + santanderInternalId no Firestore
+    // Busca workspaceId + santanderInternalId + txId no Firestore
     let workspaceId        = null;
     let santanderInternalId = null;
+    let txId               = null;
 
     if (db) {
       try {
         const wsDoc = await db.collection('santanderWorkspaces').doc(nsuCode).get();
         if (wsDoc.exists) {
-          workspaceId         = wsDoc.data().workspaceId;
-          santanderInternalId = wsDoc.data().santanderInternalId || null;
+          const wsData        = wsDoc.data();
+          workspaceId         = wsData.workspaceId;
+          santanderInternalId = wsData.santanderInternalId || null;
+          txId                = wsData.txId || null;
         }
       } catch (e) {
         console.warn('⚠️ Erro ao buscar workspace para cancelamento:', e.message);
@@ -775,9 +782,10 @@ app.delete('/api/santander/boletos/:nsuCode', authenticateFirebase, async (req, 
           let snap = await db.collection('boletos').where('nsu', '==', nsuCode).limit(1).get();
           if (snap.empty) snap = await db.collection('boletos').where('boletoId', '==', nsuCode).limit(1).get();
           if (!snap.empty) {
-            const bd = snap.docs[0].data();
+            const bd            = snap.docs[0].data();
             workspaceId         = bd.workspaceId || bd.santanderWorkspaceId || null;
             santanderInternalId = bd.santanderInternalId || null;
+            txId                = bd.txId || null;
           }
         } catch (e) {
           console.warn('⚠️ Erro ao buscar boleto para cancelamento:', e.message);
@@ -785,9 +793,15 @@ app.delete('/api/santander/boletos/:nsuCode', authenticateFirebase, async (req, 
       }
     }
 
+    // Determina o melhor identificador para cancelamento:
+    // Santander não retorna um campo "id" na criação — usa txId ou nsuCode dentro do workspace
+    const bankSlipRef = santanderInternalId || txId || nsuCode;
+
     console.log(`🔍 Dados encontrados para cancelamento:`, {
       workspaceId,
       santanderInternalId,
+      txId,
+      bankSlipRef,
       nsuCode
     });
 
@@ -800,18 +814,6 @@ app.delete('/api/santander/boletos/:nsuCode', authenticateFirebase, async (req, 
       });
     }
 
-    if (!santanderInternalId) {
-      console.warn(`⚠️ santanderInternalId não encontrado para NSU ${nsuCode} — impossível cancelar no Santander`);
-      return res.json({
-        success: true,
-        message: 'ID interno do Santander não encontrado — cancelado apenas localmente. Cancele manualmente no portal.',
-        localOnly: true,
-        workspaceId,
-        nsuCode
-      });
-    }
-
-    const baseCancel = `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips/${santanderInternalId}`;
     const headers = {
       'Authorization':     `Bearer ${accessToken}`,
       'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
@@ -819,30 +821,54 @@ app.delete('/api/santander/boletos/:nsuCode', authenticateFirebase, async (req, 
       'Accept':            'application/json'
     };
 
-    // Tenta DELETE primeiro
-    let cancelado = false;
-    try {
-      console.log(`➡️ DELETE Santander: ${baseCancel}`);
-      await axios.delete(baseCancel, { headers, httpsAgent, timeout: 30000 });
-      cancelado = true;
-      console.log(`✅ Boleto ${nsuCode} cancelado via DELETE`);
-    } catch (deleteErr) {
-      const delStatus = deleteErr.response?.status;
-      const delData   = deleteErr.response?.data;
-      console.warn(`⚠️ DELETE falhou (${delStatus}):`, JSON.stringify(delData));
-
-      // Tenta PATCH com situation=CANCELLED como fallback
+    // Função auxiliar para tentar cancelar em uma URL específica
+    const tentarCancelar = async (url) => {
+      // Tenta DELETE primeiro
       try {
-        console.log(`➡️ Tentando PATCH com situation=CANCELLED: ${baseCancel}`);
-        await axios.patch(baseCancel, { situation: 'CANCELLED' }, { headers, httpsAgent, timeout: 30000 });
-        cancelado = true;
-        console.log(`✅ Boleto ${nsuCode} cancelado via PATCH`);
-      } catch (patchErr) {
-        const patchStatus = patchErr.response?.status;
-        const patchData   = patchErr.response?.data;
-        console.error(`❌ PATCH também falhou (${patchStatus}):`, JSON.stringify(patchData));
-        throw new Error(`DELETE: ${JSON.stringify(delData)} | PATCH: ${JSON.stringify(patchData)}`);
+        console.log(`➡️ DELETE Santander: ${url}`);
+        await axios.delete(url, { headers, httpsAgent, timeout: 30000 });
+        console.log(`✅ Cancelado via DELETE: ${url}`);
+        return { ok: true };
+      } catch (deleteErr) {
+        const delStatus = deleteErr.response?.status;
+        const delData   = deleteErr.response?.data;
+        console.warn(`⚠️ DELETE falhou (${delStatus}):`, JSON.stringify(delData));
+
+        if (delStatus === 404) return { ok: false, notFound: true, delData };
+
+        // Tenta PATCH com situation=CANCELLED como fallback
+        try {
+          console.log(`➡️ Tentando PATCH com situation=CANCELLED: ${url}`);
+          await axios.patch(url, { situation: 'CANCELLED' }, { headers, httpsAgent, timeout: 30000 });
+          console.log(`✅ Cancelado via PATCH: ${url}`);
+          return { ok: true };
+        } catch (patchErr) {
+          const patchStatus = patchErr.response?.status;
+          const patchData   = patchErr.response?.data;
+          console.error(`❌ PATCH também falhou (${patchStatus}):`, JSON.stringify(patchData));
+          if (patchStatus === 404) return { ok: false, notFound: true, delData, patchData };
+          return { ok: false, delData, patchData, error: `DELETE: ${JSON.stringify(delData)} | PATCH: ${JSON.stringify(patchData)}` };
+        }
       }
+    };
+
+    let cancelado = false;
+    const baseUrlWs = `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips`;
+
+    // Tenta cada referência em ordem: bankSlipRef → txId (se diferente) → nsuCode (se diferente)
+    const refs = [...new Set([bankSlipRef, txId, nsuCode].filter(Boolean))];
+    let lastError = null;
+
+    for (const ref of refs) {
+      const url = `${baseUrlWs}/${ref}`;
+      const result = await tentarCancelar(url);
+      if (result.ok) { cancelado = true; break; }
+      lastError = result.error;
+      if (!result.notFound) break; // se não é 404, não adianta tentar outro ref
+    }
+
+    if (!cancelado) {
+      throw new Error(lastError || 'Não foi possível cancelar o boleto no Santander');
     }
 
     console.log(`✅ Boleto ${nsuCode} cancelado no Santander (cancelado=${cancelado})`);
