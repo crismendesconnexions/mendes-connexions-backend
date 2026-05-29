@@ -609,19 +609,80 @@ app.get('/api/santander/boletos/:nsuCode', async (req, res) => {
       }
     }
 
-    // ── 4b. Fallback: lista com filtro de NSU ─────────────────────────────
+    // ── 4b. Fallback: lista com filtro de NSU + intervalo de datas ───────
     if (!response) {
-      console.log(`➡️ Listando bank_slips?nsuCode=${nsuCode} no workspace ${workspaceId}`);
-      const listResp = await axios.get(baseUrl, {
-        headers,
-        httpsAgent,
-        timeout: 30000,
-        params: { nsuCode: nsuCode }
-      });
+      // Extrai data do NSU (formato YYMMDDHHMMSSSEQ)
+      // Ex: 260529120716187 → ano=2026, mes=05, dia=29
+      const nsuDateStr = nsuCode.length >= 6 ? nsuCode.substring(0, 6) : null;
+      let dateInitial = null;
+      let dateFinal   = null;
+      if (nsuDateStr) {
+        const yy = nsuDateStr.substring(0, 2);
+        const mm = nsuDateStr.substring(2, 4);
+        const dd = nsuDateStr.substring(4, 6);
+        const base = new Date(`20${yy}-${mm}-${dd}`);
+        const before = new Date(base); before.setDate(before.getDate() - 1);
+        const after  = new Date(base); after.setDate(after.getDate() + 60);
+        dateInitial = formatarDataParaSantander(before);
+        dateFinal   = formatarDataParaSantander(after);
+      } else {
+        // Sem data no NSU: janela de 60 dias até hoje
+        const hoje = new Date();
+        const inicio = new Date(hoje); inicio.setDate(inicio.getDate() - 60);
+        dateInitial = formatarDataParaSantander(inicio);
+        dateFinal   = formatarDataParaSantander(hoje);
+      }
+
+      console.log(`➡️ Listando bank_slips | workspace=${workspaceId} | nsuCode=${nsuCode} | datas=${dateInitial}→${dateFinal}`);
+
+      let listResp;
+      try {
+        listResp = await axios.get(baseUrl, {
+          headers,
+          httpsAgent,
+          timeout: 30000,
+          params: {
+            nsuCode:            nsuCode,
+            paymentDateInitial: dateInitial,
+            paymentDateFinal:   dateFinal
+          }
+        });
+      } catch (listErr) {
+        const listErrData = listErr.response?.data;
+        console.warn('⚠️ Listagem com paymentDate falhou:', JSON.stringify(listErrData));
+
+        // Tenta com issueDateInitial / issueDateFinal (data de emissão)
+        try {
+          console.log('➡️ Tentando com issueDate...');
+          listResp = await axios.get(baseUrl, {
+            headers,
+            httpsAgent,
+            timeout: 30000,
+            params: {
+              nsuCode:          nsuCode,
+              issueDateInitial: dateInitial,
+              issueDateFinal:   dateFinal
+            }
+          });
+        } catch (listErr2) {
+          const listErr2Data = listErr2.response?.data;
+          console.warn('⚠️ Listagem com issueDate também falhou:', JSON.stringify(listErr2Data));
+
+          // Boleto está num workspace diferente — não pode ser consultado
+          // O Flutter deve re-registrar este boleto via "Registrar auto"
+          return res.status(404).json({
+            error: 'Boleto não encontrado — workspace diferente',
+            details: 'Este boleto foi criado em outro contexto de sessão Santander. Use a opção "Registrar auto" para re-registrá-lo.',
+            nsuCode,
+            hint: 'RE_REGISTRAR',
+            debugPaymentDate: listErrData,
+            debugIssueDate:   listErr2Data
+          });
+        }
+      }
 
       console.log("📋 Listagem Santander:", JSON.stringify(listResp.data, null, 2));
 
-      // A resposta pode ser array ou objeto com campo items/data/bankSlips
       const items = Array.isArray(listResp.data)
         ? listResp.data
         : (listResp.data?.items || listResp.data?.data || listResp.data?.bankSlips || []);
@@ -635,12 +696,13 @@ app.get('/api/santander/boletos/:nsuCode', async (req, res) => {
         return res.json({ success: true, message: 'Boleto encontrado', data: match });
       }
 
-      // Se a lista veio vazia ou sem match, retorna o raw da listagem para diagnóstico
+      // Lista veio OK mas boleto não está neste workspace
       return res.status(404).json({
-        error: 'Boleto não encontrado na listagem do workspace',
-        details: 'O NSU não consta neste workspace — o boleto pode ter sido criado em outro contexto',
+        error: 'Boleto não encontrado neste workspace',
+        details: 'O NSU não consta no workspace atual. Use "Registrar auto" para re-registrar.',
         nsuCode,
-        listagem: listResp.data
+        hint: 'RE_REGISTRAR',
+        totalEncontrados: items.length
       });
     }
 
