@@ -1,4 +1,3 @@
-// server.js
 const express = require('express');
 const cors = require('cors');
 const admin = require('firebase-admin');
@@ -617,6 +616,7 @@ app.get('/api/santander/boletos/:nsuCode', async (req, res) => {
     }
 
     // ── 4a. GET via endpoint /bills com bankNumber (mais confiável) ───────────
+    // /bills retorna uma lista (array ou { content: [...] }) — extrai o primeiro item
     if (bankNumber) {
       const billsUrl = `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills`;
       console.log(`➡️ GET /bills | bankNumber=${bankNumber} | covenantCode=${covenantCode}`);
@@ -625,8 +625,28 @@ app.get('/api/santander/boletos/:nsuCode', async (req, res) => {
           headers, httpsAgent, timeout: 30000,
           params: { beneficiaryCode: covenantCode, bankNumber }
         });
-        console.log("✅ Boleto encontrado via /bills. Situação:", billResp.data?.situation);
-        response = billResp;
+
+        // Normaliza o formato da resposta: array direto OU { content: [...] }
+        const raw = billResp.data;
+        let boleto = null;
+        if (Array.isArray(raw) && raw.length > 0) {
+          boleto = raw[0];
+        } else if (raw && Array.isArray(raw.content) && raw.content.length > 0) {
+          boleto = raw.content[0];
+        } else if (raw && typeof raw === 'object' && raw.situation) {
+          // Resposta já é um objeto único
+          boleto = raw;
+        }
+
+        if (boleto) {
+          console.log(`✅ Boleto encontrado via /bills. Situação: ${boleto.situation} | Status: ${boleto.status}`);
+          // Substitui data da resposta pelo objeto normalizado (único boleto)
+          response = { ...billResp, data: boleto };
+        } else {
+          console.warn(`⚠️ GET /bills retornou lista vazia para bankNumber=${bankNumber}`);
+          console.log(`   Resposta bruta: ${JSON.stringify(raw).substring(0, 300)}`);
+          response = null;
+        }
       } catch (e) {
         console.warn(`⚠️ GET /bills falhou (${e.response?.status}):`, JSON.stringify(e.response?.data));
         response = null;
