@@ -5,9 +5,7 @@ const admin = require('firebase-admin');
 const axios = require('axios');
 const helmet = require('helmet');
 const https = require('https');
-
 const app = express();
-
 // =============================================
 // CONFIGURAÇÃO DE SEGURANÇA
 // =============================================
@@ -17,7 +15,6 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
 app.disable('x-powered-by');
-
 // =============================================
 // CONFIGURAÇÃO CORS ATUALIZADA
 // =============================================
@@ -33,16 +30,13 @@ const allowedOrigins = [
   'https://mendes-connexions.web.app',
   'https://mendes-connexions.firebaseapp.com'
 ];
-
 const corsOptions = {
   origin: function (origin, callback) {
     if (!origin) {
       return callback(null, true);
     }
-    
     const isLocalhost = origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1');
     const isAllowedDomain = allowedOrigins.indexOf(origin) !== -1;
-
     if (isLocalhost || isAllowedDomain) {
       console.log('✅ CORS permitido para:', origin);
       callback(null, true);
@@ -57,16 +51,13 @@ const corsOptions = {
   exposedHeaders: ['Content-Length', 'X-Requested-With'],
   optionsSuccessStatus: 200
 };
-
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
-
 // =============================================
 // MIDDLEWARES GLOBAIS
 // =============================================
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ extended: true, limit: '15mb' }));
-
 // Middleware de log para debug
 app.use((req, res, next) => {
   const start = Date.now();
@@ -76,45 +67,37 @@ app.use((req, res, next) => {
   });
   next();
 });
-
 // =============================================
 // MIDDLEWARE DE AUTENTICAÇÃO FIREBASE
 // =============================================
 const authenticateFirebase = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
-
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({
         error: 'Token de autenticação não fornecido',
         details: 'Formato esperado: Bearer <token>'
       });
     }
-
     const token = authHeader.split('Bearer ')[1];
-
     if (!token) {
       return res.status(401).json({
         error: 'Token inválido',
         details: 'Token não encontrado no header Authorization'
       });
     }
-
     if (!admin.apps.length) {
       return res.status(500).json({
         error: 'Serviço de autenticação indisponível',
         details: 'Firebase Admin não inicializado'
       });
     }
-
     const decodedToken = await admin.auth().verifyIdToken(token);
     req.user = decodedToken;
-
     console.log('✅ Usuário autenticado:', {
       uid: decodedToken.uid,
       email: decodedToken.email
     });
-
     next();
   } catch (error) {
     console.error('❌ Erro na autenticação Firebase:', error);
@@ -124,13 +107,11 @@ const authenticateFirebase = async (req, res, next) => {
     });
   }
 };
-
 // =============================================
 // INICIALIZAÇÃO FIREBASE ADMIN
 // =============================================
 let serviceAccount;
 let db = null;
-
 try {
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -140,7 +121,6 @@ try {
 } catch (err) {
   console.error('❌ Erro ao parsear FIREBASE_SERVICE_ACCOUNT:', err.message);
 }
-
 if (serviceAccount) {
   try {
     admin.initializeApp({
@@ -156,7 +136,6 @@ if (serviceAccount) {
 } else {
   console.error('❌ Firebase Admin não inicializado - serviceAccount indisponível');
 }
-
 // =============================================
 // CONFIGURAÇÃO SANTANDER
 // =============================================
@@ -167,7 +146,6 @@ const SANTANDER_CONFIG = {
   PARTICIPANT_CODE: "00000001",
   DICT_KEY: process.env.SANTANDER_DICT_KEY || "09199193000126"
 };
-
 // =============================================
 // ROTAS DE DIAGNÓSTICO
 // =============================================
@@ -182,7 +160,6 @@ app.get('/health', (req, res) => {
     firebase: !!admin.apps.length
   });
 });
-
 app.get('/test', (req, res) => {
   res.json({
     success: true,
@@ -191,11 +168,9 @@ app.get('/test', (req, res) => {
     mode: process.env.USE_MOCK === 'true' ? 'MOCK' : 'REAL'
   });
 });
-
 app.get('/api/debug-env', (req, res) => {
   const cert = process.env.SANTANDER_CERTIFICATE_CRT_B64 || '';
   const key = process.env.SANTANDER_PRIVATE_KEY_B64 || '';
-  
   res.json({
     hasCert: !!cert,
     hasKey: !!key,
@@ -204,7 +179,6 @@ app.get('/api/debug-env', (req, res) => {
     mode: process.env.USE_MOCK === 'true' ? 'MOCK' : 'REAL'
   });
 });
-
 // =============================================
 // AGENTE HTTPS SANTANDER
 // =============================================
@@ -213,17 +187,14 @@ function createHttpsAgent() {
     let certRaw = process.env.SANTANDER_CERTIFICATE_CRT_B64;
     let keyRaw = process.env.SANTANDER_PRIVATE_KEY_B64;
     const passphrase = process.env.SANTANDER_CERT_PASSWORD || undefined;
-
     if (!certRaw || !keyRaw) {
       console.error('❌ [MTLS] Faltam variáveis de ambiente para certificado');
       return null;
     }
-
     const cleanPEM = (raw) => {
       if (raw.includes('-----BEGIN')) {
         return raw.replace(/\\n/g, '\n');
       }
-      
       try {
         const decoded = Buffer.from(raw, 'base64').toString('utf-8');
         const pemMatch = decoded.match(/-----BEGIN[^-]+-----[\s\S]+?-----END[^-]+-----/);
@@ -236,13 +207,10 @@ function createHttpsAgent() {
         return raw;
       }
     };
-
     const cert = cleanPEM(certRaw);
     const key = cleanPEM(keyRaw);
-
     console.log('✅ Certificado carregado');
     console.log('✅ Chave carregada');
-
     const agentOptions = {
       cert: cert,
       key: key,
@@ -250,19 +218,15 @@ function createHttpsAgent() {
       minVersion: 'TLSv1.2',
       ciphers: 'DEFAULT:@SECLEVEL=0'
     };
-
     if (passphrase) {
       agentOptions.passphrase = passphrase;
     }
-
     return new https.Agent(agentOptions);
-
   } catch (error) {
     console.error('❌ [MTLS] Erro ao criar Agente:', error.message);
     return null;
   }
 }
-
 // =============================================
 // FUNÇÕES DE DATA
 // =============================================
@@ -273,12 +237,10 @@ function formatarDataParaSantander(date) {
   const dia = String(dataSP.getDate()).padStart(2, '0');
   return `${ano}-${mes}-${dia}`;
 }
-
 function calcularCincoDiasUteis() {
   const hoje = new Date();
   let data = new Date(hoje);
   let diasUteis = 0;
-  
   while (diasUteis < 5) {
     data.setDate(data.getDate() + 1);
     const diaSemana = data.getDay();
@@ -286,14 +248,11 @@ function calcularCincoDiasUteis() {
       diasUteis++;
     }
   }
-  
   return formatarDataParaSantander(data);
 }
-
 function gerarDataAtual() {
   return formatarDataParaSantander(new Date());
 }
-
 // =============================================
 // FUNÇÃO: BUSCAR CLIENT NUMBER
 // =============================================
@@ -302,48 +261,39 @@ async function buscarClientNumber(lojistaId) {
     console.error('❌ Firestore não inicializado');
     return null;
   }
-
   try {
     console.log('🔍 Buscando clientNumber para lojista:', lojistaId);
     const lojistaDoc = await db.collection('lojistas').doc(lojistaId).get();
-
     if (!lojistaDoc.exists) {
       console.log('❌ Lojista não encontrado');
       return null;
     }
-
     const data = lojistaDoc.data();
     const clientNumber = data.clientNumber || data.idNumber;
-
     console.log('📋 Dados do lojista:', {
       clientNumber,
       nome: data.nomeFantasia || data.nome
     });
-
     return clientNumber?.toString() || null;
   } catch (error) {
     console.error('💥 Erro ao buscar clientNumber:', error);
     return null;
   }
 }
-
 // =============================================
 // FUNÇÃO: OBTER TOKEN SANTANDER
 // =============================================
 async function obterTokenSantander() {
   console.log("\n=== [1] Solicitando TOKEN Santander ===");
-
   const formData = new URLSearchParams({
     client_id: SANTANDER_CONFIG.CLIENT_ID,
     client_secret: SANTANDER_CONFIG.CLIENT_SECRET,
     grant_type: 'client_credentials',
     scope: 'collection_bill_management'
   });
-
   try {
     const httpsAgent = createHttpsAgent();
     if (!httpsAgent) throw new Error('Agente HTTPS não pôde ser criado');
-
     const response = await axios.post(
       'https://trust-open.api.santander.com.br/auth/oauth/v2/token',
       formData,
@@ -356,7 +306,6 @@ async function obterTokenSantander() {
         timeout: 30000
       }
     );
-
     console.log("✅ Token recebido com sucesso");
     return response.data.access_token;
   } catch (err) {
@@ -364,23 +313,19 @@ async function obterTokenSantander() {
     throw err;
   }
 }
-
 // =============================================
 // FUNÇÃO: CRIAR WORKSPACE
 // =============================================
 async function criarWorkspace(accessToken) {
   console.log("\n=== [2] Criando WORKSPACE ===");
-
   const payload = {
     type: "BILLING",
     description: "Workspace de Cobrança",
     covenants: [{ code: SANTANDER_CONFIG.COVENANT_CODE }]
   };
-
   try {
     const httpsAgent = createHttpsAgent();
     if (!httpsAgent) throw new Error('Agente HTTPS não disponível');
-
     const response = await axios.post(
       'https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces',
       payload,
@@ -394,7 +339,6 @@ async function criarWorkspace(accessToken) {
         timeout: 30000
       }
     );
-
     console.log("✅ Workspace criada:", response.data.id);
     return response.data.id;
   } catch (error) {
@@ -402,39 +346,31 @@ async function criarWorkspace(accessToken) {
     throw error;
   }
 }
-
 // =============================================
 // FUNÇÃO: GERAR NSU
 // =============================================
 async function gerarNSU(clientNumber) {
   const agoraSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
-
   const YY = String(agoraSP.getFullYear()).slice(-2);
   const MM = String(agoraSP.getMonth() + 1).padStart(2, '0');
   const DD = String(agoraSP.getDate()).padStart(2, '0');
   const HH = String(agoraSP.getHours()).padStart(2, '0');
   const min = String(agoraSP.getMinutes()).padStart(2, '0');
   const SS = String(agoraSP.getSeconds()).padStart(2, '0');
-
   if (!db) {
     return `${YY}${MM}${DD}${HH}${min}${SS}001`;
   }
-
   try {
     const ref = db.collection('config').doc('ultimoNSU');
     const doc = await ref.get();
     let ultimoSequencial = 0;
-
     if (doc.exists && doc.data()?.sequencial) {
       ultimoSequencial = parseInt(doc.data().sequencial);
     }
-
     const novoSequencial = (ultimoSequencial + 1) % 1000;
     await ref.set({ sequencial: novoSequencial });
-
     const sequencialStr = String(novoSequencial).padStart(3, '0');
     const nsu = `${YY}${MM}${DD}${HH}${min}${SS}${sequencialStr}`;
-
     console.log(`🔢 NSU gerado: ${nsu}`);
     return nsu;
   } catch (error) {
@@ -442,7 +378,6 @@ async function gerarNSU(clientNumber) {
     return `${YY}${MM}${DD}${HH}${min}${SS}${String(clientNumber).slice(-3).padStart(3, '0')}`;
   }
 }
-
 // =============================================
 // FUNÇÃO: GERAR BANK NUMBER
 // =============================================
@@ -451,43 +386,31 @@ function gerarBankNumber(nsuCode, clientNumber) {
   const clientPadded = String(clientNumber).padStart(3, '0');
   return `${ultimos4}${clientPadded}`;
 }
-
 // =============================================
-// ROTA: REGISTRAR BOLETO (MODO REAL)
+// ROTA: REGISTRAR BOLETO
 // =============================================
 app.post('/api/santander/boletos', async (req, res) => {
   console.log("📥 Recebendo requisição para gerar boleto...");
-
   const { dadosBoleto, lojistaId } = req.body;
   if (!dadosBoleto || !lojistaId) {
     return res.status(400).json({
       error: 'Dados do boleto ou ID do lojista não fornecidos'
     });
   }
-
   try {
-    // Buscar clientNumber do lojista
     const clientNumber = await buscarClientNumber(lojistaId);
     if (!clientNumber) {
       return res.status(400).json({
         error: 'ClientNumber do lojista não encontrado'
       });
     }
-
-    // Obter token de acesso
     const accessToken = await obterTokenSantander();
-    
-    // Criar workspace
     const workspaceId = await criarWorkspace(accessToken);
-    
-    // Gerar NSU
     const nsuCode = await gerarNSU(clientNumber);
     const bankNumber = gerarBankNumber(nsuCode, clientNumber);
-
     const dueDate = calcularCincoDiasUteis();
     const nsuDate = gerarDataAtual();
     const issueDate = gerarDataAtual();
-
     const payload = {
       environment: "PRODUCAO",
       nsuCode: nsuCode,
@@ -519,14 +442,11 @@ app.post('/api/santander/boletos', async (req, res) => {
         dictKey: SANTANDER_CONFIG.DICT_KEY.replace(/[^0-9]/g, '')
       }
     };
-
     console.log("📦 Enviando para Santander...");
-
     const httpsAgent = createHttpsAgent();
     if (!httpsAgent) {
       throw new Error('Agente HTTPS não disponível');
     }
-
     const boletoResponse = await axios.post(
       `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips`,
       payload,
@@ -540,9 +460,7 @@ app.post('/api/santander/boletos', async (req, res) => {
         timeout: 30000
       }
     );
-
     console.log("✅ Boleto registrado com sucesso!");
-
     res.json({
       success: true,
       message: 'Boleto registrado com sucesso',
@@ -550,10 +468,8 @@ app.post('/api/santander/boletos', async (req, res) => {
       digitableLine: boletoResponse.data.digitableLine,
       data: boletoResponse.data
     });
-
   } catch (error) {
     console.error("❌ Erro no fluxo Santander:", error.message);
-    
     res.status(500).json({
       error: 'Falha no processo Santander',
       details: error.message,
@@ -562,17 +478,19 @@ app.post('/api/santander/boletos', async (req, res) => {
     });
   }
 });
-
 // =============================================
-// ROTA: BAIXAR PDF DO BOLETO
+// ROTA: CONSULTAR STATUS DO BOLETO ← ADICIONADA
 // =============================================
-app.post('/api/santander/boletos/pdf', async (req, res) => {
-  console.log("📥 Recebendo requisição para baixar PDF do boleto...");
+app.get('/api/santander/boletos/:nsuCode', async (req, res) => {
+  const { nsuCode } = req.params;
+  console.log(`📥 Consultando boleto NSU: ${nsuCode}`);
 
-  const { digitableLine, payerDocumentNumber } = req.body;
-  if (!digitableLine || !payerDocumentNumber) {
+  // Validação: NSU deve ser numérico
+  if (!nsuCode || !/^\d+$/.test(nsuCode)) {
     return res.status(400).json({
-      error: "Dados incompletos"
+      error: 'NSU inválido',
+      details: 'O NSU deve conter apenas dígitos numéricos',
+      nsuRecebido: nsuCode
     });
   }
 
@@ -584,12 +502,75 @@ app.post('/api/santander/boletos/pdf', async (req, res) => {
       throw new Error('Agente HTTPS não disponível');
     }
 
-    const url = `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`;
+    const santanderUrl = `https://trust-open.api.santander.com.br/collection_bill_management/v2/bank_slips/${nsuCode}`;
+    console.log(`➡️ URL Santander: ${santanderUrl}`);
 
+    const response = await axios.get(santanderUrl, {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
+        'Accept': 'application/json'
+      },
+      httpsAgent,
+      timeout: 30000
+    });
+
+    console.log("✅ Boleto consultado. Situação:", response.data?.situation);
+
+    res.json({
+      success: true,
+      message: 'Boleto encontrado',
+      data: response.data
+    });
+
+  } catch (error) {
+    const httpStatus = error.response?.status;
+    const errorData = error.response?.data;
+
+    console.error("❌ Erro ao consultar boleto:", {
+      nsuCode,
+      httpStatus,
+      message: error.message,
+      data: errorData
+    });
+
+    if (httpStatus === 404) {
+      return res.status(404).json({
+        error: 'Boleto não encontrado no Santander',
+        details: errorData || 'NSU não existe ou não está registrado',
+        nsuCode
+      });
+    }
+
+    res.status(500).json({
+      error: 'Falha ao consultar boleto',
+      details: errorData || error.message,
+      nsuCode,
+      step: 'consultar_boleto'
+    });
+  }
+});
+// =============================================
+// ROTA: BAIXAR PDF DO BOLETO
+// =============================================
+app.post('/api/santander/boletos/pdf', async (req, res) => {
+  console.log("📥 Recebendo requisição para baixar PDF do boleto...");
+  const { digitableLine, payerDocumentNumber } = req.body;
+  if (!digitableLine || !payerDocumentNumber) {
+    return res.status(400).json({
+      error: "Dados incompletos"
+    });
+  }
+  try {
+    const accessToken = await obterTokenSantander();
+    const httpsAgent = createHttpsAgent();
+    if (!httpsAgent) {
+      throw new Error('Agente HTTPS não disponível');
+    }
+    const url = `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills/${digitableLine}/bank_slips`;
     const payload = {
       payerDocumentNumber: payerDocumentNumber.toString().replace(/[^0-9]/g, '')
     };
-
     const response = await axios.post(url, payload, {
       headers: {
         "Content-Type": "application/json",
@@ -599,21 +580,16 @@ app.post('/api/santander/boletos/pdf', async (req, res) => {
       httpsAgent,
       timeout: 30000
     });
-
     const link = response.data?.link || response.data?.url;
-
     if (!link) {
       throw new Error('Link do PDF não encontrado');
     }
-
     console.log("✅ PDF gerado com sucesso!");
-
     res.json({
       success: true,
       link: link,
       digitableLine: digitableLine
     });
-
   } catch (error) {
     console.error("❌ Erro ao gerar PDF:", error.message);
     res.status(500).json({
@@ -622,51 +598,38 @@ app.post('/api/santander/boletos/pdf', async (req, res) => {
     });
   }
 });
-
 // =============================================
 // ROTA: UPLOAD PARA CLOUDINARY
 // =============================================
 app.post('/api/cloudinary/upload-pdf', authenticateFirebase, async (req, res) => {
   try {
     const { pdfUrl, fileName, boletoId } = req.body;
-
     console.log('☁️ Iniciando upload para Cloudinary...');
-
     if (!pdfUrl || !fileName) {
       return res.status(400).json({
         error: 'Dados incompletos'
       });
     }
-
-    // Baixar PDF da URL
     const pdfResponse = await fetch(pdfUrl);
     if (!pdfResponse.ok) {
       throw new Error(`Erro ao baixar PDF: ${pdfResponse.status}`);
     }
-
     const pdfBlob = await pdfResponse.blob();
     console.log(`✅ PDF baixado: ${pdfBlob.size} bytes`);
-
-    // Upload para Cloudinary
     const formData = new FormData();
     formData.append('file', pdfBlob, fileName);
     formData.append('upload_preset', 'boletos');
     formData.append('folder', 'boletos-mendes-connexions');
-
     const cloudinaryResponse = await fetch(`https://api.cloudinary.com/v1_1/dno43pc3o/upload`, {
       method: 'POST',
       body: formData
     });
-
     if (!cloudinaryResponse.ok) {
       const errorData = await cloudinaryResponse.json();
       throw new Error(errorData.error?.message || 'Erro no upload');
     }
-
     const cloudinaryData = await cloudinaryResponse.json();
-
     console.log('✅ Upload Cloudinary realizado:', cloudinaryData.secure_url);
-
     if (boletoId && db) {
       await db.collection('boletos').doc(boletoId).update({
         boletoViewUrl: cloudinaryData.secure_url,
@@ -674,13 +637,11 @@ app.post('/api/cloudinary/upload-pdf', authenticateFirebase, async (req, res) =>
         boletoUploadedAt: new Date().toISOString()
       });
     }
-
     res.json({
       success: true,
       cloudinaryUrl: cloudinaryData.secure_url,
       publicId: cloudinaryData.public_id
     });
-
   } catch (error) {
     console.error('❌ Erro no upload:', error.message);
     res.status(500).json({
@@ -688,40 +649,41 @@ app.post('/api/cloudinary/upload-pdf', authenticateFirebase, async (req, res) =>
     });
   }
 });
-
 // =============================================
 // ROTA: DOWNLOAD DIRETO DO PDF
 // =============================================
 app.get('/api/cloudinary/download-pdf', authenticateFirebase, async (req, res) => {
   try {
     const { publicId, fileName = 'boleto.pdf' } = req.query;
-    
     if (!publicId) {
       return res.status(400).json({ error: 'publicId é obrigatório' });
     }
-
     const downloadUrl = `https://res.cloudinary.com/dno43pc3o/raw/upload/fl_attachment:${fileName}/${publicId}`;
-    
     const response = await fetch(downloadUrl);
-    
     if (!response.ok) {
       throw new Error(`Erro ao baixar PDF: ${response.status}`);
     }
-    
     const pdfBuffer = await response.buffer();
-    
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.setHeader('Content-Length', pdfBuffer.length);
-    
     res.send(pdfBuffer);
-    
   } catch (error) {
     console.error('❌ Erro no download:', error.message);
     res.status(500).json({ error: 'Erro ao baixar PDF: ' + error.message });
   }
 });
-
+// =============================================
+// ROTA 404 CUSTOMIZADA
+// =============================================
+app.use('*', (req, res) => {
+  res.status(404).json({
+    error: 'Rota não encontrada',
+    path: req.originalUrl,
+    method: req.method,
+    timestamp: new Date().toISOString()
+  });
+});
 // =============================================
 // INICIALIZAÇÃO DO SERVIDOR
 // =============================================
