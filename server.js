@@ -463,30 +463,30 @@ app.post('/api/santander/boletos', async (req, res) => {
     console.log("✅ Boleto registrado com sucesso!");
     console.log("📦 Resposta Santander (criação):", JSON.stringify(boletoResponse.data, null, 2));
 
-    const nsuRetornado = boletoResponse.data.nsuCode || nsuCode;
-    // Santander não retorna um campo "id" — usa txId ou nsuCode como identificador
-    const txId = boletoResponse.data.txId || null;
-    const santanderInternalId = boletoResponse.data.id
-      || boletoResponse.data.bankSlipId
-      || boletoResponse.data.bankslipId
-      || txId
-      || null;
+    const nsuRetornado   = boletoResponse.data.nsuCode || nsuCode;
+    const txId           = boletoResponse.data.txId || null;
+    // Nosso Número definitivo retornado pelo Santander (pode diferir do que enviamos)
+    // Usar o retornado pela API como fonte de verdade para operações PATCH/GET
+    const bankNumberFinal = boletoResponse.data.bankNumber || bankNumber || null;
+    const covenantCode   = boletoResponse.data.covenantCode || SANTANDER_CONFIG.COVENANT_CODE || '178622';
 
-    // Persistir workspaceId + identificadores no Firestore para operações futuras
+    // Persistir workspaceId + bankNumber + covenantCode no Firestore para operações futuras
+    // bankNumber + covenantCode são os campos usados para PATCH (baixar) e GET (bills)
     if (db && workspaceId && nsuRetornado) {
       try {
         await db.collection('santanderWorkspaces').doc(nsuRetornado).set({
-          workspaceId:        workspaceId,
-          nsuCode:            nsuRetornado,
-          txId:               txId,
-          santanderInternalId: santanderInternalId,
-          lojistaId:          lojistaId,
-          criadoEm:           new Date().toISOString()
+          workspaceId:   workspaceId,
+          nsuCode:       nsuRetornado,
+          txId:          txId,
+          bankNumber:    bankNumberFinal,
+          covenantCode:  covenantCode,
+          lojistaId:     lojistaId,
+          criadoEm:      new Date().toISOString()
         });
         console.log(`💾 Dados salvos para NSU ${nsuRetornado}:`);
         console.log(`   workspaceId: ${workspaceId}`);
-        console.log(`   txId: ${txId}`);
-        console.log(`   santanderInternalId: ${santanderInternalId}`);
+        console.log(`   bankNumber: ${bankNumberFinal}`);
+        console.log(`   covenantCode: ${covenantCode}`);
       } catch (fsErr) {
         console.warn('⚠️ Não foi possível salvar no Firestore:', fsErr.message);
       }
@@ -497,7 +497,9 @@ app.post('/api/santander/boletos', async (req, res) => {
       message: 'Boleto registrado com sucesso',
       boletoId: nsuRetornado,
       workspaceId: workspaceId,
-      santanderInternalId: santanderInternalId,
+      bankNumber: bankNumberFinal,
+      covenantCode: covenantCode,
+      txId: txId,
       digitableLine: boletoResponse.data.digitableLine,
       data: boletoResponse.data
     });
@@ -600,116 +602,58 @@ app.get('/api/santander/boletos/:nsuCode', async (req, res) => {
 
     let response;
 
-    // ── 4a. Tenta GET direto pelo nsuCode no path (mais eficiente) ────────
-    {
-      const urlByNsu = `${baseUrl}/${nsuCode}`;
-      console.log(`➡️ Tentando GET por NSU no path: ${urlByNsu}`);
+    // ── Busca bankNumber e covenantCode no Firestore (salvos na criação) ─────
+    let bankNumber   = null;
+    let covenantCode = SANTANDER_CONFIG.COVENANT_CODE || '178622';
+    if (db) {
       try {
-        response = await axios.get(urlByNsu, { headers, httpsAgent, timeout: 30000 });
-        console.log("✅ Boleto encontrado por NSU direto. Situação:", response.data?.situation);
+        const wsDoc = await db.collection('santanderWorkspaces').doc(nsuCode).get();
+        if (wsDoc.exists) {
+          bankNumber   = wsDoc.data().bankNumber   || null;
+          covenantCode = wsDoc.data().covenantCode || covenantCode;
+          workspaceId  = workspaceId || wsDoc.data().workspaceId || null;
+        }
+      } catch (e) { /* não crítico */ }
+    }
+
+    // ── 4a. GET via endpoint /bills com bankNumber (mais confiável) ───────────
+    if (bankNumber) {
+      const billsUrl = `https://trust-open.api.santander.com.br/collection_bill_management/v2/bills`;
+      console.log(`➡️ GET /bills | bankNumber=${bankNumber} | covenantCode=${covenantCode}`);
+      try {
+        const billResp = await axios.get(billsUrl, {
+          headers, httpsAgent, timeout: 30000,
+          params: { beneficiaryCode: covenantCode, bankNumber }
+        });
+        console.log("✅ Boleto encontrado via /bills. Situação:", billResp.data?.situation);
+        response = billResp;
       } catch (e) {
-        console.warn(`⚠️ GET por NSU direto falhou (${e.response?.status}), tentando listagem`);
+        console.warn(`⚠️ GET /bills falhou (${e.response?.status}):`, JSON.stringify(e.response?.data));
         response = null;
       }
     }
 
-    // ── 4b. Fallback: lista com filtro de NSU + datas + status ────────────
+    // ── 4b. Fallback: GET SONDA pelo nsuCode no path ──────────────────────────
+    if (!response && workspaceId) {
+      const urlByNsu = `${baseUrl}/${nsuCode}`;
+      console.log(`➡️ GET SONDA por NSU: ${urlByNsu}`);
+      try {
+        response = await axios.get(urlByNsu, { headers, httpsAgent, timeout: 30000 });
+        console.log("✅ Boleto encontrado via SONDA. Situação:", response.data?.situation);
+      } catch (e) {
+        console.warn(`⚠️ GET SONDA falhou (${e.response?.status})`);
+        response = null;
+      }
+    }
+
+    // ── 4c. Sem bankNumber e sem workspaceId → não pode consultar ────────────
     if (!response) {
-      // Extrai data do NSU (formato YYMMDDHHMMSSSEQ → YYMMDD)
-      const nsuDateStr = nsuCode.length >= 6 ? nsuCode.substring(0, 6) : null;
-      let dateInitial = null;
-      let dateFinal   = null;
-      if (nsuDateStr && /^\d{6}$/.test(nsuDateStr)) {
-        const yy = nsuDateStr.substring(0, 2);
-        const mm = nsuDateStr.substring(2, 4);
-        const dd = nsuDateStr.substring(4, 6);
-        const base = new Date(`20${yy}-${mm}-${dd}`);
-        const before = new Date(base); before.setDate(before.getDate() - 2);
-        const after  = new Date(base); after.setDate(after.getDate() + 90);
-        dateInitial = formatarDataParaSantander(before);
-        dateFinal   = formatarDataParaSantander(after);
-      } else {
-        const hoje = new Date();
-        const inicio = new Date(hoje); inicio.setDate(inicio.getDate() - 90);
-        dateInitial = formatarDataParaSantander(inicio);
-        dateFinal   = formatarDataParaSantander(hoje);
-      }
-
-      console.log(`➡️ Listando bank_slips | workspace=${workspaceId} | nsuCode=${nsuCode} | datas=${dateInitial}→${dateFinal}`);
-
-      // Santander exige status obrigatório — tenta os mais comuns em sequência
-      const statusList = ['NORMAL', 'VENCIDO', 'BAIXADO', 'PAGO'];
-      let listResp = null;
-
-      for (const status of statusList) {
-        try {
-          listResp = await axios.get(baseUrl, {
-            headers, httpsAgent, timeout: 30000,
-            params: {
-              nsuCode,
-              paymentDateInitial: dateInitial,
-              paymentDateFinal:   dateFinal,
-              status
-            }
-          });
-          if (listResp) break;
-        } catch (e) {
-          console.warn(`⚠️ Listagem status=${status} falhou (${e.response?.status})`);
-          listResp = null;
-        }
-      }
-
-      // Último fallback: issueDate com range amplo + paymentDate coringa
-      if (!listResp) {
-        try {
-          console.log('➡️ Tentando com issueDate + paymentDate amplo...');
-          listResp = await axios.get(baseUrl, {
-            headers, httpsAgent, timeout: 30000,
-            params: {
-              nsuCode,
-              issueDateInitial:   dateInitial,
-              issueDateFinal:     dateFinal,
-              paymentDateInitial: '2026-01-01',
-              paymentDateFinal:   '2030-12-31',
-              status:             'NORMAL'
-            }
-          });
-        } catch (listErr2) {
-          const listErr2Data = listErr2.response?.data;
-          console.warn('⚠️ Todas as tentativas de listagem falharam:', JSON.stringify(listErr2Data));
-
-          return res.status(404).json({
-            error: 'Boleto não encontrado — workspace diferente ou NSU inválido',
-            details: 'Este boleto pode ter sido criado em outro contexto. Use "Registrar auto" para re-registrá-lo.',
-            nsuCode,
-            hint: 'RE_REGISTRAR',
-            debugIssueDate: listErr2Data
-          });
-        }
-      }
-
-      console.log("📋 Listagem Santander:", JSON.stringify(listResp.data, null, 2));
-
-      const items = Array.isArray(listResp.data)
-        ? listResp.data
-        : (listResp.data?.items || listResp.data?.data || listResp.data?.bankSlips || []);
-
-      const match = items.find(b =>
-        b.nsuCode === nsuCode || b.nsu === nsuCode || b.bankSlipNsu === nsuCode
-      );
-
-      if (match) {
-        console.log("✅ Boleto encontrado na listagem. Situação:", match.situation);
-        return res.json({ success: true, message: 'Boleto encontrado', data: match });
-      }
-
-      // Lista veio OK mas boleto não está neste workspace
+      console.warn(`⚠️ Boleto NSU ${nsuCode} não encontrado em nenhum endpoint`);
       return res.status(404).json({
-        error: 'Boleto não encontrado neste workspace',
-        details: 'O NSU não consta no workspace atual. Use "Registrar auto" para re-registrar.',
+        error: 'Boleto não encontrado no Santander',
+        details: 'bankNumber não disponível ou workspace diferente. Use "Registrar auto" para re-registrar.',
         nsuCode,
-        hint: 'RE_REGISTRAR',
-        totalEncontrados: items.length
+        hint: 'RE_REGISTRAR'
       });
     }
 
@@ -762,43 +706,42 @@ app.delete('/api/santander/boletos/:nsuCode', authenticateFirebase, async (req, 
     const httpsAgent  = createHttpsAgent();
     if (!httpsAgent) throw new Error('Agente HTTPS não disponível');
 
-    // Busca workspaceId + santanderInternalId + txId no Firestore
-    let workspaceId        = null;
-    let santanderInternalId = null;
-    let txId               = null;
+    // Busca workspaceId + bankNumber + covenantCode no Firestore (salvos na criação)
+    let workspaceId  = null;
+    let bankNumber   = null;
+    let covenantCode = SANTANDER_CONFIG.COVENANT_CODE || '178622';
 
     if (db) {
       try {
         const wsDoc = await db.collection('santanderWorkspaces').doc(nsuCode).get();
         if (wsDoc.exists) {
-          const wsData        = wsDoc.data();
-          workspaceId         = wsData.workspaceId;
-          santanderInternalId = wsData.santanderInternalId || null;
-          txId                = wsData.txId || null;
+          const d    = wsDoc.data();
+          workspaceId  = d.workspaceId  || null;
+          bankNumber   = d.bankNumber   || null;
+          covenantCode = d.covenantCode || covenantCode;
         }
       } catch (e) {
-        console.warn('⚠️ Erro ao buscar workspace para cancelamento:', e.message);
+        console.warn('⚠️ Erro ao buscar santanderWorkspaces:', e.message);
       }
 
-      if (!workspaceId) {
+      // Fallback: busca no doc de boleto
+      if (!workspaceId || !bankNumber) {
         try {
           let snap = await db.collection('boletos').where('nsu', '==', nsuCode).limit(1).get();
           if (snap.empty) snap = await db.collection('boletos').where('boletoId', '==', nsuCode).limit(1).get();
           if (!snap.empty) {
-            const bd            = snap.docs[0].data();
-            workspaceId         = bd.workspaceId || bd.santanderWorkspaceId || null;
-            santanderInternalId = bd.santanderInternalId || null;
-            txId                = bd.txId || null;
+            const bd = snap.docs[0].data();
+            workspaceId  = workspaceId  || bd.workspaceId || bd.santanderWorkspaceId || null;
+            bankNumber   = bankNumber   || bd.bankNumber  || null;
+            covenantCode = covenantCode || bd.santanderResponse?.covenantCode || '178622';
           }
         } catch (e) {
-          console.warn('⚠️ Erro ao buscar boleto para cancelamento:', e.message);
+          console.warn('⚠️ Erro ao buscar boleto:', e.message);
         }
       }
     }
 
-    console.log(`🔍 Dados encontrados para cancelamento:`, {
-      workspaceId, santanderInternalId, txId, nsuCode
-    });
+    console.log(`🔍 Dados para cancelamento:`, { workspaceId, bankNumber, covenantCode, nsuCode });
 
     if (!workspaceId) {
       console.warn(`⚠️ workspaceId não encontrado para NSU ${nsuCode} — cancelamento local apenas`);
@@ -809,99 +752,70 @@ app.delete('/api/santander/boletos/:nsuCode', authenticateFirebase, async (req, 
       });
     }
 
-    const baseUrlWs = `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips`;
+    if (!bankNumber) {
+      console.warn(`⚠️ bankNumber não encontrado para NSU ${nsuCode} — cancelamento local apenas`);
+      return res.json({
+        success: true,
+        message: 'bankNumber não disponível para este boleto — cancele manualmente no portal Santander.',
+        localOnly: true,
+        workspaceId,
+        nsuCode
+      });
+    }
+
     const headers = {
       'Authorization':     `Bearer ${accessToken}`,
       'X-Application-Key': SANTANDER_CONFIG.CLIENT_ID,
       'Content-Type':      'application/json',
       'Accept':            'application/json'
     };
+    const opts = { headers, httpsAgent, timeout: 30000 };
 
-    // Santander aceita nsuCode (15 dígitos) como identificador do bank_slip no path.
-    // txId/santanderInternalId retornam 405 porque o formato não é aceito.
-    // Tenta nsuCode primeiro; txId como alternativa apenas se nsuCode retornar 404.
-    const refs = [...new Set([nsuCode, txId, santanderInternalId].filter(Boolean))];
-
-    // Tenta cancelar usando diferentes métodos HTTP em ordem
-    const tentarCancelarUrl = async (url) => {
-      const cancelBody = { situation: 'CANCELLED' };
-      const opts       = { headers, httpsAgent, timeout: 30000 };
-
-      // 1. PATCH (padrão REST para atualização parcial)
-      try {
-        console.log(`➡️ PATCH ${url}`);
-        await axios.patch(url, cancelBody, opts);
-        console.log(`✅ Cancelado via PATCH`);
-        return { ok: true };
-      } catch (e) {
-        const st = e.response?.status;
-        console.warn(`⚠️ PATCH falhou (${st}):`, JSON.stringify(e.response?.data));
-        if (st === 404) return { ok: false, notFound: true };
-      }
-
-      // 2. PUT (algumas APIs usam PUT para atualização completa de status)
-      try {
-        console.log(`➡️ PUT ${url}`);
-        await axios.put(url, cancelBody, opts);
-        console.log(`✅ Cancelado via PUT`);
-        return { ok: true };
-      } catch (e) {
-        const st = e.response?.status;
-        console.warn(`⚠️ PUT falhou (${st}):`, JSON.stringify(e.response?.data));
-        if (st === 404) return { ok: false, notFound: true };
-      }
-
-      // 3. DELETE (alguns endpoints aceitam)
-      try {
-        console.log(`➡️ DELETE ${url}`);
-        await axios.delete(url, opts);
-        console.log(`✅ Cancelado via DELETE`);
-        return { ok: true };
-      } catch (e) {
-        const st = e.response?.status;
-        console.warn(`⚠️ DELETE falhou (${st}):`, JSON.stringify(e.response?.data));
-        if (st === 404) return { ok: false, notFound: true };
-      }
-
-      // 4. POST /baixar (write-off — equivalente ao cancelamento na maioria dos bancos)
-      const urlBaixar = `${url}/baixar`;
-      try {
-        console.log(`➡️ POST ${urlBaixar}`);
-        await axios.post(urlBaixar, {}, opts);
-        console.log(`✅ Cancelado via POST /baixar`);
-        return { ok: true };
-      } catch (e) {
-        const st = e.response?.status;
-        const dt = e.response?.data;
-        console.warn(`⚠️ POST /baixar falhou (${st}):`, JSON.stringify(dt));
-        if (st === 404) return { ok: false, notFound: true };
-        return { ok: false, error: JSON.stringify(dt || e.message) };
-      }
+    // ── Conforme documentação Santander API v2.1 ────────────────────────────
+    // BAIXAR = PATCH na URL BASE /bank_slips (sem ID no path)
+    // O boleto é identificado pelo covenantCode + bankNumber no body
+    // Ref: "6.2 BANK SLIP | Comando de Instruções | PATCH"
+    const urlPatch = `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips`;
+    const baixarBody = {
+      covenantCode: covenantCode,
+      bankNumber:   bankNumber,
+      operation:    'BAIXAR'
     };
 
     let cancelado = false;
-    let lastError = null;
 
-    for (const ref of refs) {
-      const url    = `${baseUrlWs}/${ref}`;
-      const result = await tentarCancelarUrl(url);
-      if (result.ok) { cancelado = true; break; }
-      if (result.notFound) continue; // 404 → tenta próxima ref
-      lastError = result.error;
-      break; // erro real → para
+    try {
+      console.log(`➡️ PATCH ${urlPatch} | body:`, JSON.stringify(baixarBody));
+      await axios.patch(urlPatch, baixarBody, opts);
+      cancelado = true;
+      console.log(`✅ Boleto ${nsuCode} baixado via PATCH (operation=BAIXAR)`);
+    } catch (patchErr) {
+      const st = patchErr.response?.status;
+      const dt = patchErr.response?.data;
+      console.warn(`⚠️ PATCH BAIXAR falhou (${st}):`, JSON.stringify(dt));
+
+      if (st !== 404 && st !== 400) {
+        // Tenta PUT como alternativa
+        try {
+          console.log(`➡️ PUT ${urlPatch}`);
+          await axios.put(urlPatch, baixarBody, opts);
+          cancelado = true;
+          console.log(`✅ Boleto ${nsuCode} baixado via PUT`);
+        } catch (putErr) {
+          console.warn(`⚠️ PUT também falhou (${putErr.response?.status}):`, JSON.stringify(putErr.response?.data));
+        }
+      }
     }
 
     if (!cancelado) {
-      // Se nenhum método funcionou, retorna localOnly para que o Flutter
-      // remova localmente e oriente o usuário a cancelar manualmente
-      console.warn(`⚠️ Nenhum método de cancelamento funcionou para NSU ${nsuCode} — retornando localOnly`);
+      console.warn(`⚠️ Não foi possível cancelar ${nsuCode} via API — retornando localOnly`);
       return res.json({
         success: true,
-        message: 'Não foi possível cancelar via API Santander (método não suportado). Cancele manualmente no portal.',
+        message: 'Não foi possível cancelar via API Santander. Cancele manualmente no portal usando o bankNumber: ' + bankNumber,
         localOnly: true,
         workspaceId,
-        nsuCode,
-        error: lastError
+        bankNumber,
+        nsuCode
       });
     }
 
