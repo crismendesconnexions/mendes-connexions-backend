@@ -461,10 +461,28 @@ app.post('/api/santander/boletos', async (req, res) => {
       }
     );
     console.log("✅ Boleto registrado com sucesso!");
+
+    // Persistir workspaceId + nsuCode no Firestore para consultas futuras
+    const nsuRetornado = boletoResponse.data.nsuCode || nsuCode;
+    if (db && workspaceId && nsuRetornado) {
+      try {
+        await db.collection('santanderWorkspaces').doc(nsuRetornado).set({
+          workspaceId: workspaceId,
+          nsuCode: nsuRetornado,
+          lojistaId: lojistaId,
+          criadoEm: new Date().toISOString()
+        });
+        console.log(`💾 workspaceId salvo no Firestore para NSU ${nsuRetornado}`);
+      } catch (fsErr) {
+        console.warn('⚠️ Não foi possível salvar workspaceId no Firestore:', fsErr.message);
+      }
+    }
+
     res.json({
       success: true,
       message: 'Boleto registrado com sucesso',
-      boletoId: boletoResponse.data.nsuCode,
+      boletoId: nsuRetornado,
+      workspaceId: workspaceId,
       digitableLine: boletoResponse.data.digitableLine,
       data: boletoResponse.data
     });
@@ -479,7 +497,7 @@ app.post('/api/santander/boletos', async (req, res) => {
   }
 });
 // =============================================
-// ROTA: CONSULTAR STATUS DO BOLETO ← ADICIONADA
+// ROTA: CONSULTAR STATUS DO BOLETO
 // =============================================
 app.get('/api/santander/boletos/:nsuCode', async (req, res) => {
   const { nsuCode } = req.params;
@@ -502,7 +520,51 @@ app.get('/api/santander/boletos/:nsuCode', async (req, res) => {
       throw new Error('Agente HTTPS não disponível');
     }
 
-    const santanderUrl = `https://trust-open.api.santander.com.br/collection_bill_management/v2/bank_slips/${nsuCode}`;
+    // ── 1. Buscar workspaceId salvo no Firestore ───────────────────────────
+    let workspaceId = null;
+
+    if (db) {
+      // Tenta na coleção santanderWorkspaces (salva na criação)
+      try {
+        const wsDoc = await db.collection('santanderWorkspaces').doc(nsuCode).get();
+        if (wsDoc.exists) {
+          workspaceId = wsDoc.data().workspaceId;
+          console.log(`✅ workspaceId encontrado no Firestore: ${workspaceId}`);
+        }
+      } catch (e) {
+        console.warn('⚠️ Erro ao buscar santanderWorkspaces:', e.message);
+      }
+
+      // Fallback: busca na coleção boletos pelo campo nsu ou boletoId
+      if (!workspaceId) {
+        try {
+          let boletosSnap = await db.collection('boletos')
+            .where('nsu', '==', nsuCode).limit(1).get();
+          if (boletosSnap.empty) {
+            boletosSnap = await db.collection('boletos')
+              .where('boletoId', '==', nsuCode).limit(1).get();
+          }
+          if (!boletosSnap.empty) {
+            const bd = boletosSnap.docs[0].data();
+            workspaceId = bd.workspaceId || bd.santanderWorkspaceId || null;
+            if (workspaceId) {
+              console.log(`✅ workspaceId encontrado em boletos: ${workspaceId}`);
+            }
+          }
+        } catch (e) {
+          console.warn('⚠️ Erro ao buscar boletos por NSU:', e.message);
+        }
+      }
+    }
+
+    // ── 2. Se ainda não tem workspaceId, cria um novo (fallback) ──────────
+    if (!workspaceId) {
+      console.log('⚠️ workspaceId não encontrado — criando novo workspace como fallback');
+      workspaceId = await criarWorkspace(accessToken);
+    }
+
+    // ── 3. Consulta o boleto no Santander com workspace-scoped URL ─────────
+    const santanderUrl = `https://trust-open.api.santander.com.br/collection_bill_management/v2/workspaces/${workspaceId}/bank_slips/${nsuCode}`;
     console.log(`➡️ URL Santander: ${santanderUrl}`);
 
     const response = await axios.get(santanderUrl, {
@@ -537,7 +599,7 @@ app.get('/api/santander/boletos/:nsuCode', async (req, res) => {
     if (httpStatus === 404) {
       return res.status(404).json({
         error: 'Boleto não encontrado no Santander',
-        details: errorData || 'NSU não existe ou não está registrado',
+        details: errorData || 'NSU não registrado ou expirado',
         nsuCode
       });
     }
