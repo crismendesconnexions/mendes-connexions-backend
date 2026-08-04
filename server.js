@@ -407,7 +407,10 @@ app.post('/api/santander/boletos', async (req, res) => {
     const workspaceId = await criarWorkspace(accessToken);
     const nsuCode = await gerarNSU(clientNumber);
     const bankNumber = gerarBankNumber(nsuCode, clientNumber);
-    const dueDate = calcularCincoDiasUteis();
+    // Vencimento: usa o informado (YYYY-MM-DD, ex.: mensalidades) ou 5 dias úteis.
+    const dueDate = /^\d{4}-\d{2}-\d{2}$/.test(dadosBoleto.dueDate || '')
+      ? dadosBoleto.dueDate
+      : calcularCincoDiasUteis();
     const nsuDate = gerarDataAtual();
     const issueDate = gerarDataAtual();
     const payload = {
@@ -436,11 +439,44 @@ app.post('/api/santander/boletos', async (req, res) => {
       paymentType: "REGISTRO",
       writeOffQuantityDays: "30",
       messages: ["Boleto gerado via Mendes Connexions"],
+      // (multa/juros/protesto/baixa aplicados abaixo a partir da config)
       key: {
         type: "CNPJ",
         dictKey: SANTANDER_CONFIG.DICT_KEY.replace(/[^0-9]/g, '')
       }
     };
+
+    // ── Configuração de cobrança (multa/juros/protesto/prazo) ──────────────
+    // São dois perfis, escolhidos por dadosBoleto.tipoCobranca:
+    //   'pontuacao' -> configuracoes/boletosPontuacao
+    //   qualquer outro (ou ausente) -> configuracoes/boletos (financeiro)
+    // Se o doc de pontuação não existir, cai no do financeiro para não
+    // emitir boleto sem regra nenhuma.
+    try {
+      if (db) {
+        const ehPontuacao = String(dadosBoleto.tipoCobranca || '') === 'pontuacao';
+        const docCfg = ehPontuacao ? 'boletosPontuacao' : 'boletos';
+        let cfgSnap = await db.collection('configuracoes').doc(docCfg).get();
+        if (!cfgSnap.exists && ehPontuacao) {
+          cfgSnap = await db.collection('configuracoes').doc('boletos').get();
+        }
+        const cfg = cfgSnap.exists ? cfgSnap.data() : {};
+        const multa = Number(cfg.multaPercent) || 0;      // %
+        const juros = Number(cfg.jurosPercentMes) || 0;   // % ao mês
+        const baixaDias = Number(cfg.baixaDias) || 30;    // dias até baixa
+        payload.writeOffQuantityDays = String(baixaDias);
+        if (multa > 0) payload.finePercentage = multa.toFixed(2);
+        if (juros > 0) payload.interestPercentage = juros.toFixed(2);
+        if (cfg.protestar === true) {
+          payload.protestType = "CLEAN";
+          payload.protestQuantityDays = String(Number(cfg.protestoDias) || 0);
+        }
+        console.log(`⚙️ Config cobrança (${docCfg}): multa=${multa}% juros=${juros}% baixa=${baixaDias}d protesto=${cfg.protestar === true}`);
+      }
+    } catch (cfgErr) {
+      console.warn('⚠️ Não foi possível ler config de cobrança:', cfgErr.message);
+    }
+
     console.log("📦 Enviando para Santander...");
     const httpsAgent = createHttpsAgent();
     if (!httpsAgent) {
@@ -995,6 +1031,120 @@ app.get('/api/cloudinary/download-pdf', authenticateFirebase, async (req, res) =
     res.status(500).json({ error: 'Erro ao baixar PDF: ' + error.message });
   }
 });
+// =============================================
+// WEBHOOK: NOTIFICAÇÃO DE PAGAMENTO
+// =============================================
+// O Santander (ou um job de conciliação) chama esta rota quando um boleto é
+// pago. Damos baixa automática: marcamos o boleto como pago nas coleções
+// (boletos e boletos_mensalidade), refletimos nas pontuações e lançamos a
+// entrada no financeiro (regime de caixa).
+//
+// Corpo aceito (flexível):
+//   { nsuCode | nsu | bankNumber, status?, paymentDate?, paymentAmount? }
+// Protegido por chave: header 'x-webhook-secret' ou ?secret= (mendes2024).
+function isPagoSituation(s) {
+  const v = String(s || '').toUpperCase();
+  return ['LIQUIDATED', 'LIQUIDADO', 'PAGO', 'BAIXADO', 'SETTLED', 'PAID'].includes(v);
+}
+
+async function darBaixaPorNsu(nsuCode, info = {}) {
+  if (!db) throw new Error('Firestore indisponível');
+  const dataPag = info.paymentDate ? new Date(info.paymentDate) : new Date();
+  const resultados = [];
+
+  // Procura nas duas coleções, por vários campos de NSU.
+  const colecoes = ['boletos_mensalidade', 'boletos'];
+  for (const col of colecoes) {
+    const campos = ['boletoNsuCode', 'nsu', 'boletoId'];
+    let achou = null;
+    for (const campo of campos) {
+      const snap = await db.collection(col).where(campo, '==', String(nsuCode)).limit(1).get();
+      if (!snap.empty) { achou = snap.docs[0]; break; }
+    }
+    if (!achou) continue;
+
+    const b = achou.data();
+    if (b.status === 'pago') { resultados.push(`${col}: já estava pago`); continue; }
+
+    await achou.ref.update({
+      status: 'pago',
+      dataPagamento: admin.firestore.Timestamp.fromDate(dataPag),
+      pagoViaWebhook: true,
+    });
+
+    // Lançamento de entrada (regime de caixa)
+    const origem = col === 'boletos' ? 'Pontuação' : 'Mensalidade';
+    const valor = b.valor || b.valorBoleto || info.paymentAmount || 0;
+    await db.collection('financeiro_lancamentos').add({
+      tipo: 'entrada',
+      categoria: origem,
+      descricao: `${origem} - ${b.lojistaNome || ''}${b.competencia ? ` (${b.competencia})` : ''}`,
+      valor: Number(valor),
+      data: admin.firestore.Timestamp.fromDate(dataPag),
+      boletoId: achou.id,
+      boletoColecao: col,
+      origem,
+      criadoEm: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Reflete nas pontuações vinculadas (quando for boleto de pontuação)
+    if (col === 'boletos') {
+      try {
+        const pts = await db.collection('pontuacoes').where('boletoNsuCode', '==', String(nsuCode)).get();
+        const batch = db.batch();
+        pts.forEach((p) => batch.update(p.ref, {
+          status: 'realizado',
+          statusBoleto: 'pago',
+          dataPagamento: admin.firestore.Timestamp.fromDate(dataPag),
+          pagoViaWebhook: true,
+        }));
+        await batch.commit();
+      } catch (e) {
+        console.warn('⚠️ Falha ao atualizar pontuações:', e.message);
+      }
+    }
+    resultados.push(`${col}: baixado`);
+  }
+  return resultados;
+}
+
+app.post('/api/santander/webhook', async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+
+  const secret = req.headers['x-webhook-secret'] || req.query.secret;
+  if (secret !== 'mendes2024') {
+    return res.status(401).json({ success: false, error: 'Chave inválida' });
+  }
+
+  try {
+    const body = req.body || {};
+    const nsuCode = body.nsuCode || body.nsu || body.bankNumber ||
+      (body.data && (body.data.nsuCode || body.data.nsu));
+    const situation = body.status || body.situation ||
+      (body.data && (body.data.situation || body.data.status));
+
+    if (!nsuCode) {
+      return res.status(400).json({ success: false, error: 'nsuCode não informado' });
+    }
+    // Se veio status e NÃO é pago, apenas registra e sai.
+    if (situation && !isPagoSituation(situation)) {
+      console.log(`ℹ️ Webhook NSU ${nsuCode} status ${situation} (ignorado, não é pago)`);
+      return res.json({ success: true, ignored: true, situation });
+    }
+
+    const resultados = await darBaixaPorNsu(nsuCode, {
+      paymentDate: body.paymentDate || (body.data && body.data.paymentDate),
+      paymentAmount: body.paymentAmount || (body.data && body.data.paymentAmount),
+    });
+    console.log(`✅ Webhook baixa NSU ${nsuCode}:`, resultados);
+    res.json({ success: true, nsuCode, resultados });
+  } catch (error) {
+    console.error('❌ Erro no webhook:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // =============================================
 // ROTA 404 CUSTOMIZADA
 // =============================================
