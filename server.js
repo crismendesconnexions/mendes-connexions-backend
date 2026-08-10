@@ -413,6 +413,29 @@ app.post('/api/santander/boletos', async (req, res) => {
       : calcularCincoDiasUteis();
     const nsuDate = gerarDataAtual();
     const issueDate = gerarDataAtual();
+    // O Santander recusa acento, cedilha e caractere de controle nos campos
+    // do pagador. "ENDEREÇO NÃO INFORMADO" (que o app manda como fallback)
+    // chegava com acento e derrubava o registro.
+    // normalize('NFD') separa a letra do acento ("Ç" vira "C" + cedilha);
+    // o filtro seguinte descarta tudo que não for ASCII simples, então o
+    // acento cai e a letra permanece.
+    const soASCII = (txt, tamanho) => String(txt || '')
+      .normalize('NFD')
+      .replace(/[^A-Za-z0-9 .,\-\/]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toUpperCase()
+      .substring(0, tamanho);
+
+    const docPagador = String(dadosBoleto.pagadorDocumento || '').replace(/[^0-9]/g, '');
+    // CPF tem 11 dígitos, CNPJ tem 14. Mandar o tipo errado é recusa na hora.
+    const tipoDocPagador = docPagador.length === 11 ? "CPF" : "CNPJ";
+
+    // CEP zerado é inválido. Sem CEP de verdade, usa um CEP existente para o
+    // registro não morrer — o endereço não afeta a cobrança em si.
+    let cepPagador = String(dadosBoleto.pagadorCEP || '').replace(/[^0-9]/g, '');
+    if (cepPagador.length !== 8 || cepPagador === '00000000') cepPagador = '01310100';
+
     const payload = {
       environment: "PRODUCAO",
       nsuCode: nsuCode,
@@ -425,14 +448,14 @@ app.post('/api/santander/boletos', async (req, res) => {
       participantCode: SANTANDER_CONFIG.PARTICIPANT_CODE,
       nominalValue: parseFloat(dadosBoleto.valor).toFixed(2),
       payer: {
-        name: (dadosBoleto.pagadorNome || "LOJISTA").toUpperCase().substring(0, 40),
-        documentType: "CNPJ",
-        documentNumber: (dadosBoleto.pagadorDocumento || "00000000000000").replace(/[^0-9]/g, ''),
-        address: (dadosBoleto.pagadorEndereco || "ENDERECO NAO INFORMADO").toUpperCase().substring(0, 40),
-        neighborhood: (dadosBoleto.bairro || "CENTRO").toUpperCase().substring(0, 20),
-        city: (dadosBoleto.pagadorCidade || "SAO PAULO").toUpperCase().substring(0, 20),
-        state: (dadosBoleto.pagadorEstado || "SP").toUpperCase().substring(0, 2),
-        zipCode: (dadosBoleto.pagadorCEP || "00000000").replace(/(\d{5})(\d{3})/, "$1-$2")
+        name: soASCII(dadosBoleto.pagadorNome || "LOJISTA", 40),
+        documentType: tipoDocPagador,
+        documentNumber: docPagador || "00000000000000",
+        address: soASCII(dadosBoleto.pagadorEndereco || "ENDERECO NAO INFORMADO", 40),
+        neighborhood: soASCII(dadosBoleto.bairro || "CENTRO", 20),
+        city: soASCII(dadosBoleto.pagadorCidade || "SAO PAULO", 20),
+        state: soASCII(dadosBoleto.pagadorEstado || "SP", 2),
+        zipCode: `${cepPagador.slice(0, 5)}-${cepPagador.slice(5)}`
       },
       documentKind: "DUPLICATA_MERCANTIL",
       deductionValue: "0.00",
@@ -467,9 +490,20 @@ app.post('/api/santander/boletos', async (req, res) => {
         payload.writeOffQuantityDays = String(baixaDias);
         if (multa > 0) payload.finePercentage = multa.toFixed(2);
         if (juros > 0) payload.interestPercentage = juros.toFixed(2);
-        if (cfg.protestar === true) {
+        // Protesto com prazo zero é instrução inválida — o banco recusa o
+        // título inteiro. Só manda a instrução se houver prazo de verdade.
+        const protestoDias = Number(cfg.protestoDias) || 0;
+        if (cfg.protestar === true && protestoDias > 0) {
           payload.protestType = "CLEAN";
-          payload.protestQuantityDays = String(Number(cfg.protestoDias) || 0);
+          payload.protestQuantityDays = String(protestoDias);
+          // A baixa não pode acontecer antes do protesto, senão as duas
+          // instruções se contradizem.
+          if (baixaDias <= protestoDias) {
+            payload.writeOffQuantityDays = String(protestoDias + 30);
+            console.warn(`⚠️ Baixa (${baixaDias}d) <= protesto (${protestoDias}d) — ajustada para ${protestoDias + 30}d`);
+          }
+        } else if (cfg.protestar === true) {
+          console.warn('⚠️ Protesto ligado mas sem prazo em dias — instrução ignorada');
         }
         console.log(`⚙️ Config cobrança (${docCfg}): multa=${multa}% juros=${juros}% baixa=${baixaDias}d protesto=${cfg.protestar === true}`);
       }
@@ -478,6 +512,9 @@ app.post('/api/santander/boletos', async (req, res) => {
     }
 
     console.log("📦 Enviando para Santander...");
+    // Payload completo no log: quando vem 400, é comparando o que foi enviado
+    // com o campo que o banco aponta que se acha o erro.
+    console.log("📤 Payload:", JSON.stringify(payload));
     const httpsAgent = createHttpsAgent();
     if (!httpsAgent) {
       throw new Error('Agente HTTPS não disponível');
@@ -539,10 +576,20 @@ app.post('/api/santander/boletos', async (req, res) => {
       data: boletoResponse.data
     });
   } catch (error) {
+    // error.message só diz "Request failed with status code 400". O motivo de
+    // verdade — qual campo o banco recusou — vem em error.response.data, que
+    // antes era descartado. Sem isso não dá para saber o que corrigir.
+    const santander = error.response?.data;
+    const httpStatus = error.response?.status;
     console.error("❌ Erro no fluxo Santander:", error.message);
+    if (santander) {
+      console.error(`❌ Resposta do banco (${httpStatus}):`, JSON.stringify(santander));
+    }
     res.status(500).json({
       error: 'Falha no processo Santander',
       details: error.message,
+      santanderStatus: httpStatus || null,
+      santanderErro: santander || null,
       step: 'registro_boleto',
       timestamp: new Date().toISOString()
     });
